@@ -1,0 +1,7 @@
+datasets==2.6.1
+transformers==4.23.1
+wandb==0.13.4
+setproctitle
+wheel
+black
+flake8

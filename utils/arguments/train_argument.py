@@ -12,9 +12,9 @@ class TrainArguments:
         default=None,
         metadata={"help": ""},
     )
-    train_batchsize: int = field(default=None)
-    valid_batchsize: int = field(default=None)
-    num_epochs: int = field(default=None)
+    train_batch_size: int = field(default=None)
+    valid_batch_size: int = field(default=None)
+    train_epochs: int = field(default=None)
 
     warmup_step: int = field(default=None)
     weight_decay: float = field(default=None)

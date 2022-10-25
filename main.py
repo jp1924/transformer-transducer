@@ -1,15 +1,16 @@
-from setproctitle import setproctitle
 import argparse
+
 import torch
-
-from utils import TrainArguments, ModelArguments, DataArguments
-
-from transformers import BertForSequenceClassification, BertTokenizerFast, BertConfig, HfArgumentParser, trainer
+import wandb
 from datasets import load_dataset
+from setproctitle import setproctitle
 from torch import optim
 from torch.utils.data import DataLoader
 from torchaudio.functional import rnnt_loss
-import wandb
+from transformers import BertConfig, BertForSequenceClassification, BertTokenizerFast, HfArgumentParser, trainer
+
+from data import TorchCollator, TorchSampler
+from utils import DataArguments, ModelArguments, TrainArguments
 
 
 def main(parser: HfArgumentParser) -> None:
@@ -25,13 +26,13 @@ def main(parser: HfArgumentParser) -> None:
     )
     model = BertForSequenceClassification.from_pretrained("klue/bert-base", cache_dir=train_args.cache, config=config)
 
-    loaded_data = load_dataset("NSMC", cache_dir=train_args.cache)
+    loaded_data = load_dataset("nsmc", cache_dir=train_args.cache)
     train_data = loaded_data["train"]
-    valid_data = loaded_data["eval"]
+    valid_data = loaded_data["test"]
 
     train_dataloader = DataLoader(
         dataset=train_data,
-        batch_size=train_args.train_batchsize,
+        batch_size=train_args.train_batch_size,
         shuffle=False,
         batch_sampler=None,
         collate_fn=None,
@@ -40,7 +41,7 @@ def main(parser: HfArgumentParser) -> None:
 
     valid_dataloader = DataLoader(
         dataset=valid_data,
-        batch_size=16,
+        batch_size=train_args.valid_batch_size,
         shuffle=False,
         batch_sampler=None,
         collate_fn=None,
@@ -50,7 +51,7 @@ def main(parser: HfArgumentParser) -> None:
     optimizer = optim.Adam(model.parameters(), train_args.learning_rate)
 
     for epoch in range(train_args.train_epochs):
-        for step, train_data in enumerate(range(train_dataloader)):
+        for step, train_data in enumerate(train_dataloader):
 
             outputs = model()
             loss = rnnt_loss()

@@ -14,7 +14,14 @@ class TrainArguments:
     )
     train_batch_size: int = field(default=None)
     valid_batch_size: int = field(default=None)
+
+    train_gradient_accumulation: int = field(default=1)
+    valid_gradient_accumulation: int = field(default=1)
+
     train_epochs: int = field(default=None)
+
+    train_max_step: int = field(default=None)
+    valid_step: int = field(default=5000)
 
     warmup_step: int = field(default=None)
     weight_decay: float = field(default=None)

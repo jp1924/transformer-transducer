@@ -1,6 +1,9 @@
-import torch
-from torch.utils.data import DataLoader
 from argparse import Namespace
+
+import torch
+import torch.distributed as dist
+from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel
 
 
 class TorchTraner:
@@ -9,8 +12,15 @@ class TorchTraner:
         self.valid_data = valid_data
         self.collator = collator
         self.args = args
-        self.model = model
         self.optimizer = optimizer
+
+        if args.local_rank != -1:
+            local_rank = self.args.local_rank
+            dist.init_process_group(backend="nccl", rank=local_rank)
+            self.model = DistributedDataParallel(model, device_ids=[args.local_rank])
+        else:
+            self.model = model
+            torch.cuda.set_device(1)
         return
 
     def train(self) -> None:
@@ -25,8 +35,7 @@ class TorchTraner:
         if self.gradient_accumulate(step):
             loss.backward()
             self.optimizer.step()
-        
-            
+
         return
 
     def valid(self) -> None:

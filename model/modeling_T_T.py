@@ -77,6 +77,7 @@ class Encoder(nn.Module):
         return hidden_state
 
 
+# from https://pytorch.org/tutorials/beginner/transformer_tutorial.html
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
         super().__init__()
@@ -99,8 +100,18 @@ class PositionalEncoding(nn.Module):
 
 
 class LabelEncoder(nn.Module):
-    def __init__(self) -> None:
-        pass
+    def __init__(self, config) -> None:
+
+        layer_num = 8
+        encoder_layers = [Encoder(config) for _ in range(layer_num)]
+        self.layers = nn.ModuleList(encoder_layers)
+
+    def forward(self, hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+
+        for encoder in self.layers:
+            hidden_state = encoder(hidden_state, attention_mask)
+
+        return hidden_state
 
 
 class AudioEncoder(nn.Module):

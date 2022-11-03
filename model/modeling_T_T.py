@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import math
 
+nn.TransformerEncoderLayer
+
 
 class SelfAttention(nn.Module):
     def __init__(self, config: dict) -> None:
@@ -57,8 +59,9 @@ class Encoder(nn.Module):
     def __init__(self, config) -> None:
         self.attn = SelfAttention(config)
         self.ffn = FeedForwardNetwork(config)
-        self.norm = nn.LayerNorm()
+        self.attn_norm = nn.LayerNorm()
         self.attn_dropout = nn.Dropout()
+        self.ffn_norm = nn.LayerNorm()
         self.ffn_dropout = nn.Dropout()
 
     def forward(self, hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
@@ -66,13 +69,13 @@ class Encoder(nn.Module):
         attn_output = self.attn(hidden_state, attention_mask)
         attn_output = self.attn_dropout(attn_output)
         hidden_state = hidden_state + attn_output
-        hidden_state = self.norm(hidden_state)
+        hidden_state = self.attn_norm(hidden_state)
 
         # [NOTE]: computing Feed_Forward Network
         ffn_output = self.ffn(hidden_state)
         ffn_output = self.ffn_dropout(ffn_output)
         hidden_state = hidden_state + ffn_output
-        hidden_state = self.norm(hidden_state)
+        hidden_state = self.ffn_norm(hidden_state)
 
         return hidden_state
 

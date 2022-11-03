@@ -1,8 +1,7 @@
 from winreg import QueryValue
 import torch
 import torch.nn as nn
-
-nn.TransformerEncoderLayer
+import math
 
 
 class SelfAttention(nn.Module):
@@ -24,14 +23,13 @@ class SelfAttention(nn.Module):
         value = input_ids
 
         key = key.transpose(1, 2)
-
         attention = torch.matmul(query, key)
 
         k_d = key.shape(2)
         scaling_factor = torch.sqrt(k_d)
         scaled_attention = attention / scaling_factor
 
-        scaled_attention *= attention_mask
+        scaled_attention += attention_mask
         attention_score = scaled_attention.softmax(dim=-1)
 
         attention_score = self.attention_dropout(attention_score)
@@ -77,6 +75,27 @@ class Encoder(nn.Module):
         hidden_state = self.norm(hidden_state)
 
         return hidden_state
+
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor, shape [seq_len, batch_size, embedding_dim]
+        """
+        x = x + self.pe[: x.size(0)]
+        return self.dropout(x)
 
 
 class LabelEncoder(nn.Module):

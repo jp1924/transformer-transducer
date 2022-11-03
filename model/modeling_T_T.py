@@ -2,27 +2,28 @@ from winreg import QueryValue
 import torch
 import torch.nn as nn
 import math
+from config import TransformerTransducerConfig
 
 nn.TransformerEncoderLayer
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, config: dict) -> None:
-        self.query_ = nn.Linear()
-        self.key = nn.Linear()
-        self.value = nn.Linear()
+    def __init__(self, config: TransformerTransducerConfig) -> None:
+        # self.query_ = nn.Linear()
+        # self.key = nn.Linear()
+        # self.value = nn.Linear()
 
-        self.attention_dropout = nn.Dropout(0.06)
+        self.score_dropout = nn.Dropout(config.score_dropout)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        hidden_size: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
 
-        query = input_ids
-        key = input_ids
-        value = input_ids
+        query = hidden_size
+        key = hidden_size
+        value = hidden_size
 
         key = key.transpose(1, 2)
         attention = torch.matmul(query, key)
@@ -34,7 +35,7 @@ class SelfAttention(nn.Module):
         scaled_attention += attention_mask
         attention_score = scaled_attention.softmax(dim=-1)
 
-        attention_score = self.attention_dropout(attention_score)
+        attention_score = self.score_dropout(attention_score)
 
         attention_value = torch.matmul(attention_score, value)
 
@@ -42,27 +43,27 @@ class SelfAttention(nn.Module):
 
 
 class FeedForwardNetwork(nn.Module):
-    def __init__(self, config) -> None:
-        self.dense = nn.Linear()
+    def __init__(self, config: TransformerTransducerConfig) -> None:
+        self.dense = nn.Linear(config.hidden_size, config.ffn_size)
         self.activation = nn.GELU()
-        self.linear_2 = nn.Linear()
-        self.dropout = nn.Dropout()
+        self.linear_2 = nn.Linear(config.ffn_size, config.hidden_size)
 
-    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
-        input_values = self.dense(input_values)
-        input_values = self.activation(input_values)
-        input_values = self.linear_2(input_values)
-        return input_values
+    def forward(self, hidden_size: torch.Tensor) -> torch.Tensor:
+        hidden_size = self.dense(hidden_size)
+        hidden_size = self.activation(hidden_size)
+        hidden_size = self.linear_2(hidden_size)
+        return hidden_size
 
 
-class Encoder(nn.Module):
-    def __init__(self, config) -> None:
+class EncoderLayer(nn.Module):
+    def __init__(self, config: TransformerTransducerConfig) -> None:
         self.attn = SelfAttention(config)
+        self.attn_norm = nn.LayerNorm(config.hidden_size, eps=config.attn_norm_eps)
+        self.attn_dropout = nn.Dropout(config.attn_dropout)
+
         self.ffn = FeedForwardNetwork(config)
-        self.attn_norm = nn.LayerNorm()
-        self.attn_dropout = nn.Dropout()
-        self.ffn_norm = nn.LayerNorm()
-        self.ffn_dropout = nn.Dropout()
+        self.ffn_norm = nn.LayerNorm(config.hidden_size, eps=config.ffn_norm_eps)
+        self.ffn_dropout = nn.Dropout(config.ffn_dropout)
 
     def forward(self, hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         # [NOTE]: computing attentions
@@ -82,9 +83,9 @@ class Encoder(nn.Module):
 
 # from https://pytorch.org/tutorials/beginner/transformer_tutorial.html
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
+    def __init__(self, config: TransformerTransducerConfig, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(config.embed_dropout)
 
         position = torch.arange(max_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
@@ -103,16 +104,16 @@ class PositionalEncoding(nn.Module):
 
 
 class LabelEncoder(nn.Module):
-    def __init__(self, config) -> None:
+    def __init__(self, config: TransformerTransducerConfig) -> None:
 
-        layer_num = 8
-        encoder_layers = [Encoder(config) for _ in range(layer_num)]
-        self.layers = nn.ModuleList(encoder_layers)
+        layer_list = [EncoderLayer(config) for _ in range(config.label_layers)]
+        self.encoder = nn.ModuleList(layer_list)
+        self.embeddings = nn.Embedding(config.position_embed_size, config.hidden_size)
 
     def forward(self, hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
 
-        for encoder in self.layers:
-            hidden_state = encoder(hidden_state, attention_mask)
+        for layer in self.encoder:
+            hidden_state = layer(hidden_state, attention_mask)
 
         return hidden_state
 

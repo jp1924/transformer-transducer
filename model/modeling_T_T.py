@@ -42,8 +42,16 @@ class SelfAttention(nn.Module):
 
 
 class FeedForwardNetwork(nn.Module):
-    def __init__(self) -> None:
-        pass
+    def __init__(self, config) -> None:
+        self.linear_1 = nn.Linear()
+        self.activation = nn.GELU()
+        self.linear_2 = nn.Linear()
+
+    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
+        input_values = self.linear_1(input_values)
+        input_values = self.activation(input_values)
+        input_values = self.linear_2(input_values)
+        return input_values
 
 
 class Encoder(nn.Module):

@@ -2,8 +2,16 @@ import torch
 import torch.nn as nn
 import math
 from .config import TransformerTransducerConfig
+from torchaudio.functional import rnnt_loss
 
-nn.TransformerEncoderLayer
+"""
+    [NOTE]
+    스스로 재작한 Transformer Encoder를 검증하기 위한 실험,
+    torch.nn의 TransformerEncoderLayer와 TransformerEncoder를 이용해 Encoder를 만듬
+    이후 Transducer를 전부 만들고 난 뒤 모델이 정상적으로 작동하는지 확인한다.
+    민약 정상적으로 loss가 떨어진다면 이후 스스로 재작한 Encoder를 넣어서 테스트 하는 방식으로 진행
+
+"""
 
 
 class SelfAttention(nn.Module):
@@ -118,12 +126,14 @@ class TestEncoder(nn.Module):
         return logits
 
 
+# [NOTE]: 여기 위 부터는 테스트 용으로 만든 Transformer Encoder
+
+
 class LabelEncoder(nn.Module):
     def __init__(self, config: TransformerTransducerConfig) -> None:
         super().__init__()
         self.position_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
         self.word_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
-
         self.position_ids = torch.arange(config.position_embed_size)
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -137,7 +147,6 @@ class LabelEncoder(nn.Module):
             device=None,
             dtype=None,
         )
-
         self.encoder = nn.TransformerEncoder(encoder_layer, config.label_layers)
 
     def forward(
@@ -159,7 +168,6 @@ class AudioEncoder(nn.Module):
     def __init__(self, config: TransformerTransducerConfig) -> None:
         super().__init__()
         self.position_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
-
         self.position_ids = torch.arange(config.position_embed_size)
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -173,7 +181,6 @@ class AudioEncoder(nn.Module):
             device=None,
             dtype=None,
         )
-
         self.encoder = nn.TransformerEncoder(encoder_layer, config.audio_layers)
 
     def forward(
@@ -194,37 +201,61 @@ class JointNetwork(nn.Module):
         super().__init__()
         joint_input_size = config.hidden_size * 2
 
-        self.dense_1 = nn.Linear(joint_input_size, config.ffn_size)
-        self.relu = nn.ReLU()
-        self.dropout_1 = nn.Dropout(config.joint_dropout_1)
-        self.dense_2 = nn.Linear(config.ffn_size, config.hidden_size)
-        self.dropout_2 = nn.Dropout(config.joint_dropout_2)
+        self.audio_dense = nn.Linear(config.hidden_size, config.ffn_size)
+        self.label_dense = nn.Linear(config.hidden_size, config.ffn_size)
 
     def forward(
         self,
-        audio_state: torch.Tensor,
-        label_state: torch.Tensor,
+        audio_vector: torch.Tensor,
+        label_vector: torch.Tensor,
     ) -> torch.Tensor:
-        joint_state = torch.cat([audio_state, label_state], dim=-1)
 
-        hideen_state = self.dense_1(joint_state)
-        hideen_state = self.relu(hideen_state)
-        hideen_state = self.dropout_1(hideen_state)
-        hideen_state = self.dense_2(hideen_state)
-        hideen_state = self.dropout_2(hideen_state)
+        audio_state = self.audio_dense(audio_vector)
+        label_state = self.label_dense(label_vector)
 
-        return hideen_state
+        hidden_state = audio_state + label_state
+
+        return hidden_state
 
 
 class TransformerTranducer(nn.Module):
     def __init__(self, config: TransformerTransducerConfig):
         super().__init__()
+        self.config = config
 
-        self.label_encoder = LabelEncoder(config)
         self.audio_encoder = AudioEncoder(config)
+        self.label_encoder = LabelEncoder(config)
         self.joint_network = JointNetwork(config)
 
+        self.tanh = nn.Tanh()
+        self.dense = nn.Linear(config.ffn_size, config.vocab_size)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self) -> torch.Tensor:
-        return
+        self.reduction = config.loss_reduction
+        self.blank_id = config.blank_id
+
+    def forward(
+        self,
+        audio_data: torch.Tensor,
+        label_data: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        audio_vector = self.audio_encoder(audio_data, attention_mask)
+        label_vector = self.label_encoder(label_data, attention_mask)
+        joint_vector = self.joint_network(audio_vector, label_vector)
+
+        hidden_state = self.tanh(joint_vector)
+        hidden_state = self.dense(hidden_state)
+        logits = self.softmax(hidden_state)
+
+        loss = rnnt_loss(
+            logits=logits,
+            targets=label_data,
+            logit_lengths=logits.shape[1],
+            target_lengths=label_data.shape[1],
+            blank=self.blank_id,
+            clamp=-1,
+            reduction=self.loss_reduction,
+        )
+
+        return loss

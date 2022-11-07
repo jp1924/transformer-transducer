@@ -1,7 +1,7 @@
 class TransformerTransducerConfig:
-    def __init__(self) -> None:
-        self.label_layers = 8
-        self.sudio_layers = 8
+    def __init__(self, vocab_size) -> None:
+        self.label_layers = 2
+        self.audio_layers = 18
 
         self.hidden_size = 756
         self.ffn_size = 3072
@@ -11,5 +11,10 @@ class TransformerTransducerConfig:
         self.attn_dropout = 0.03
         self.attn_norm_eps = 0.00001
         self.score_dropout = 0.07
+        self.head_size = 12
 
         self.position_embed_size = 512
+        self.vocab_size = vocab_size
+
+        self.joint_dropout_1 = 0.03
+        self.joint_dropout_2 = 0.03

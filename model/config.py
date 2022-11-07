@@ -16,5 +16,5 @@ class TransformerTransducerConfig:
         self.position_embed_size = 512
         self.vocab_size = vocab_size
 
-        self.joint_dropout_1 = 0.03
-        self.joint_dropout_2 = 0.03
+        self.loss_reduction = "mean"
+        self.blank_id = 1

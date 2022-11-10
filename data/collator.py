@@ -29,11 +29,70 @@ class TorchCollator:
 
 
 class TransducerCollator:
+
+    max_length: int = 512
+
     def __init__(self, tokenizer: PreTrainedTokenizer = None) -> None:
+        """DataLoader로 부터 건내받은 불규칙한 길이의 데이터를 일정한 길이오 만든 뒤 model에 건내주는 역할을 합니다.
+
+        Transformer Transducer에서 처리하기 위해 Audio데이터를 처리합니다.
+
+        **dataset의 형식**
+            "input_values": torch.Tensor(audio_data), shape(1, chnnel, time)
+            "grapheme_labels": torch.Tensor(grapheme_labels data)
+            "syllable_labels": torch.Tensor(syllable_labels data)
+            "lengths": torch.Tensor(length_data)
+
+        현재 데이터에서 syllable이 오타가 있어서 syllabel이 되었음
+        데이터는 다른 곳에서 이미 전처리가 된 상태로 만들어짐
+        그래서 collator에서 512로 짜를 수 밖에 없다.
+
+
+        Args:
+            tokenizer (PreTrainedTokenizer, optional): _description_. Defaults to None.
+        """
         self.tokenizer = tokenizer
 
-    def __call__(self, features: List[Dict[str, Any]], return_tensors=None) -> Dict[str, Any]:
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        feature_select: str = lambda key: [feature[key] for feature in features]
+        input_values: list = feature_select("input_values")
+        labels: list = feature_select("grapheme_labels")
 
-        print
+        batch = self._audio_pad(input_values)
+        labels = self.tokenizer.pad(labels, return_attention_mask=False)
 
-        return
+        batch["labels"] = labels["input_ids"]
+
+        return batch
+
+    def _audio_pad(self, input_values: List[torch.Tensor]) -> torch.Tensor:
+        chennel_size = input_values[0].shape[1]
+
+        # [NOTE]: cutting by max_length
+        input_values = [value[:, :, : self.max_length] for value in input_values]
+        max_size = max([value.shape[2] for value in input_values])
+
+        difference = [max_size - value.shape[2] for value in input_values]
+
+        attention_masks = list()
+        padded_values = list()
+        for pad_size, value in zip(difference, input_values):
+
+            value_size = value.shape[2]
+            ones = torch.ones([1, chennel_size, value_size])
+
+            pad = torch.zeros([1, chennel_size, pad_size], dtype=torch.float64)
+            value = torch.cat([value, pad], dim=2)
+            mask = torch.cat([ones, pad], dim=2)
+
+            padded_values.append(value)
+            attention_masks.append(mask)
+        input_values = torch.cat(padded_values, dim=0)
+        attention_mask = torch.cat(attention_masks, dim=0)
+
+        result = {
+            "input_vaules": input_values,
+            "attention_mask": attention_mask,
+        }
+
+        return result

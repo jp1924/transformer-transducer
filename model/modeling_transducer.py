@@ -185,13 +185,20 @@ class AudioEncoder(nn.Module):
 
     def forward(
         self,
-        audio_data: torch.Tensor,
+        audio_inputs: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        position_ids = self.position_ids[audio_data.shape[1]]
-        input_embeddings = self.position_embedding(position_ids)
+        audio_inputs = audio_inputs.transpose(1, 2)
 
-        outputs = self.encoder(input_embeddings, attention_mask)
+        seq_len = audio_inputs.size(1)
+        position_ids = self.position_ids[seq_len]
+        position_embed = self.position_embedding(position_ids)
+
+        # [NOTE]
+        # audio_inputs를 linear를 통과시킨 뒤의 embed 값과 합텨야할까? 아님 그냥 합쳐야 할까?
+
+        audio_inputs = audio_inputs + position_embed
+        outputs = self.encoder(audio_inputs, attention_mask)
 
         return outputs
 
@@ -199,8 +206,6 @@ class AudioEncoder(nn.Module):
 class JointNetwork(nn.Module):
     def __init__(self, config: TransformerTransducerConfig) -> None:
         super().__init__()
-        joint_input_size = config.hidden_size * 2
-
         self.audio_dense = nn.Linear(config.hidden_size, config.ffn_size)
         self.label_dense = nn.Linear(config.hidden_size, config.ffn_size)
 
@@ -210,10 +215,10 @@ class JointNetwork(nn.Module):
         label_vector: torch.Tensor,
     ) -> torch.Tensor:
 
-        audio_state = self.audio_dense(audio_vector)
-        label_state = self.label_dense(label_vector)
+        audio_context = self.audio_dense(audio_vector)
+        label_context = self.label_dense(label_vector)
 
-        hidden_state = audio_state + label_state
+        hidden_state = audio_context + label_context
 
         return hidden_state
 

@@ -13,17 +13,21 @@ from transformers import (
     BertTokenizerFast,
     HfArgumentParser,
     Trainer,
+    Wav2Vec2CTCTokenizer,
 )
 from transformers.optimization import AdamW
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.trainer_pt_utils import LengthGroupedSampler, DistributedLengthGroupedSampler
 import datasets
 from data import TorchCollator, TorchSampler
-from utils import DataArguments, ModelArguments, TrainArguments, get_linear_schedule_with_warmup
+from utils import DataArguments, ModelArguments, TrainArguments, get_linear_schedule_with_warmup, get_concat_dataset
 import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from data.collator import BertHeatmapCollator
+
+from model import LabelEncoder, TransformerTransducerConfig
+from torchaudio.transforms import MelSpectrogram
 
 
 def get_parser():
@@ -71,16 +75,23 @@ def main(parser: HfArgumentParser) -> None:
         output_data["label"] = input_data["label"]
         return output_data
 
-    tokenizer = BertTokenizerFast.from_pretrained("klue/bert-base", cache_dir=train_args.cache)
-    config = BertConfig.from_pretrained(
-        "klue/bert-base",
-        cache_dir=train_args.cache,
-        vocab_size=tokenizer.vocab_size,
-        num_labels=model_args.num_labels,
-        pad_token_id=tokenizer.pad_token_id,
-        # initializer_range=0.2,
-    )
-    model = BertForSequenceClassification.from_pretrained("klue/bert-base", cache_dir=train_args.cache, config=config)
+    data_dir = r"/data/jsb193/audio/logmelspect"
+    loaded_data = get_concat_dataset([data_dir], "train")
+
+    tokenizer = Wav2Vec2CTCTokenizer.from_pretrained("test42/wav2vec2-base-4data", use_auth_token=True)
+    config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
+    model = LabelEncoder(config)
+
+    # tokenizer = BertTokenizerFast.from_pretrained("klue/bert-base", cache_dir=train_args.cache)
+    # config = BertConfig.from_pretrained(
+    #     "klue/bert-base",
+    #     cache_dir=train_args.cache,
+    #     vocab_size=tokenizer.vocab_size,
+    #     num_labels=model_args.num_labels,
+    #     pad_token_id=tokenizer.pad_token_id,
+    #     # initializer_range=0.2,
+    # )
+    # model = BertForSequenceClassification.from_pretrained("klue/bert-base", cache_dir=train_args.cache, config=config)
 
     if train_args.local_rank != -1:
         torch.cuda.set_device(train_args.local_rank)
@@ -96,15 +107,15 @@ def main(parser: HfArgumentParser) -> None:
             output_device=train_args.local_rank if device_count != 0 else None,
         )
 
-    loaded_data = load_dataset("nsmc", cache_dir=train_args.cache)
-    train_data = loaded_data["train"]
-    valid_data = loaded_data["test"]
+    # loaded_data = load_dataset("nsmc", cache_dir=train_args.cache)
+    # train_data = loaded_data["train"]
+    # valid_data = loaded_data["test"]
 
-    train_data = train_data.map(preprocess, num_proc=5)
-    valid_data = valid_data.map(preprocess, num_proc=5)
+    # train_data = train_data.map(preprocess, num_proc=5)
+    # valid_data = valid_data.map(preprocess, num_proc=5)
 
-    train_data = train_data.remove_columns(["id", "document"])
-    valid_data = valid_data.remove_columns(["id", "document"])
+    # train_data = train_data.remove_columns(["id", "document"])
+    # valid_data = valid_data.remove_columns(["id", "document"])
 
     if train_args.local_rank != -1:
         sampler = DistributedSampler(
@@ -139,6 +150,8 @@ def main(parser: HfArgumentParser) -> None:
         pin_memory=True,
     )
 
+    loss_func = nn.CrossEntropyLoss()
+
     optimizer = optim.AdamW(model.parameters(), train_args.learning_rate)
     model.zero_grad()
 
@@ -155,10 +168,12 @@ def main(parser: HfArgumentParser) -> None:
                     outputs = model(**train_data)
             else:
                 train_data = {key: data for key, data in train_data.items()}
-                outputs = model(**train_data)
-            loss = outputs.loss
+                input_data = train_data["input_ids"]
+                attention_mask = train_data["attention_mask"]
+                token_type_ids = train_data["token_type_ids"]
+                logits = model(input_data, attention_mask, token_type_ids)
             # logits = outputs.logits
-            # loss = cross_entropy_loss(logits, train_data["labels"])
+            loss = loss_func(logits, train_data["labels"])
             # loss = rnnt_loss()
             loss = loss / train_args.train_accumulate
             loss.backward()

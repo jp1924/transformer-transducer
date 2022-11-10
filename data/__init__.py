@@ -1,2 +1,2 @@
-from .collator import TorchCollator
+from .collator import TorchCollator, TransducerCollator
 from .sampler import TorchSampler

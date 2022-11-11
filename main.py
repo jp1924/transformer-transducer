@@ -6,36 +6,18 @@ from datasets import load_dataset
 from setproctitle import setproctitle
 from torch import optim
 from torch.utils.data import DataLoader, DistributedSampler
-from torchaudio.functional import rnnt_loss
 from transformers import (
-    BertConfig,
-    BertForSequenceClassification,
-    BertTokenizerFast,
     HfArgumentParser,
-    Trainer,
     Wav2Vec2CTCTokenizer,
 )
-from transformers.optimization import AdamW
-from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
-from transformers.trainer_pt_utils import LengthGroupedSampler, DistributedLengthGroupedSampler
 import datasets
-from data import TorchCollator, TorchSampler
-from utils import DataArguments, ModelArguments, TrainArguments, get_linear_schedule_with_warmup, get_concat_dataset
+from data import TorchCollator
+from utils import DataArguments, ModelArguments, TrainArguments, get_concat_dataset
 import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
-from data.collator import BertHeatmapCollator
 
 from model import LabelEncoder, TransformerTransducerConfig
-from torchaudio.transforms import MelSpectrogram
-
-
-def get_parser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--local_rank", default=-1)
-    args = parser.parse_args()
-
-    return args
 
 
 def get_parameter_names(model, forbidden_layer_types):

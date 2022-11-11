@@ -154,12 +154,16 @@ class LabelEncoder(nn.Module):
         label_data: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        position_ids = self.position_ids[label_data.shape[1]]
-        position = self.position_embedding(position_ids)
-        word = self.word_embedding(label_data)
-        input_embeddings = position + word
 
-        outputs = self.encoder(input_embeddings, attention_mask)
+        attention_mask = attention_mask.transpose(1, 0)
+
+        position_ids = self.position_ids[: label_data.shape[1]]
+        position_embed = self.position_embedding(position_ids)
+        word_embed = self.word_embedding(label_data)
+
+        input_embed = position_embed + word_embed
+
+        outputs = self.encoder(input_embed, src_key_padding_mask=attention_mask)
 
         return outputs
 
@@ -167,8 +171,12 @@ class LabelEncoder(nn.Module):
 class AudioEncoder(nn.Module):
     def __init__(self, config: TransformerTransducerConfig) -> None:
         super().__init__()
-        self.position_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
-        self.position_ids = torch.arange(config.position_embed_size)
+        # self.position_embedding = PositionalEncoding(config.hidden_size)
+
+        self.test_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
+        self.test_ids = torch.arange(config.position_embed_size)
+
+        self.linear = nn.Linear(80, config.hidden_size)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=config.hidden_size,
@@ -189,16 +197,20 @@ class AudioEncoder(nn.Module):
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         audio_inputs = audio_inputs.transpose(1, 2)
+        attention_mask = attention_mask.transpose(1, 0)
 
-        seq_len = audio_inputs.size(1)
-        position_ids = self.position_ids[seq_len]
-        position_embed = self.position_embedding(position_ids)
+        seq_len = audio_inputs.shape[1]
+        position_embed = self.test_embedding(self.test_ids[:seq_len])
+
+        position_embed = position_embed.unsqueeze(0)
 
         # [NOTE]
         # audio_inputs를 linear를 통과시킨 뒤의 embed 값과 합텨야할까? 아님 그냥 합쳐야 할까?
 
+        audio_inputs = self.linear(audio_inputs)
+
         audio_inputs = audio_inputs + position_embed
-        outputs = self.encoder(audio_inputs, attention_mask)
+        outputs = self.encoder(audio_inputs, src_key_padding_mask=attention_mask)
 
         return outputs
 
@@ -206,8 +218,8 @@ class AudioEncoder(nn.Module):
 class JointNetwork(nn.Module):
     def __init__(self, config: TransformerTransducerConfig) -> None:
         super().__init__()
-        self.audio_dense = nn.Linear(config.hidden_size, config.ffn_size)
-        self.label_dense = nn.Linear(config.hidden_size, config.ffn_size)
+        concat_size = config.hidden_size * 2
+        self.dense = nn.Linear(concat_size, config.ffn_size)
 
     def forward(
         self,
@@ -215,10 +227,17 @@ class JointNetwork(nn.Module):
         label_vector: torch.Tensor,
     ) -> torch.Tensor:
 
-        audio_context = self.audio_dense(audio_vector)
-        label_context = self.label_dense(label_vector)
+        audio_len = audio_vector.shape[1]
+        label_len = label_vector.shape[1]
 
-        hidden_state = audio_context + label_context
+        audio_vector = audio_vector.unsqueeze(2)
+        label_vector = label_vector.unsqueeze(1)
+        # [NOTE]: logits (Tensor) – Tensor of dimension (batch, max seq length, max target ""length + 1"", class) containing output from joiner
+        audio_vector = audio_vector.repeat(1, 1, label_len, 1)
+        label_vector = label_vector.repeat(1, audio_len, 1, 1)
+
+        hidden_state = torch.cat([audio_vector, label_vector], dim=-1)
+        hidden_state = self.dense(hidden_state)
 
         return hidden_state
 
@@ -241,26 +260,35 @@ class TransformerTranducer(nn.Module):
 
     def forward(
         self,
-        audio_data: torch.Tensor,
-        label_data: torch.Tensor,
-        attention_mask: torch.Tensor,
+        audio_values: torch.Tensor,
+        label_values: torch.Tensor,
+        audio_attention_mask: torch.Tensor,
+        label_attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        audio_vector = self.audio_encoder(audio_data, attention_mask)
-        label_vector = self.label_encoder(label_data, attention_mask)
+
+        audio_vector = self.audio_encoder(audio_values, audio_attention_mask)
+        label_vector = self.label_encoder(label_values, label_attention_mask)
         joint_vector = self.joint_network(audio_vector, label_vector)
 
         hidden_state = self.tanh(joint_vector)
         hidden_state = self.dense(hidden_state)
         logits = self.softmax(hidden_state)
 
+        label_len = torch.IntTensor([torch.masked_select(tensor, tensor != 0).shape[0] for tensor in label_values])
+        audio_len = torch.IntTensor(
+            [torch.masked_select(tensor[0], tensor[0] != 0.0).shape[0] for tensor in audio_values]
+        )
+
+        non_blank_labels = torch.stack([tensor[1:] for tensor in label_values]).to(torch.int32)
+
         loss = rnnt_loss(
             logits=logits,
-            targets=label_data,
-            logit_lengths=logits.shape[1],
-            target_lengths=label_data.shape[1],
+            targets=non_blank_labels,
+            logit_lengths=audio_len,
+            target_lengths=label_len,
             blank=self.blank_id,
             clamp=-1,
-            reduction=self.loss_reduction,
+            reduction=self.reduction,
         )
 
         return loss

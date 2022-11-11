@@ -11,7 +11,7 @@ pytorch: torch==1.10.1+cu111
 - 단 음성이 transformer의 max_length를 넘기 때문에 차원을 줄이고자 mel-filter-bank, sliding-window를 적용해 512차원으로 음성을 축소시킨다.   
      
 ## Transformer Transducer
-![](img/architecture.PNG)
+![](img/architecture.PNG)     
      
 크게 Label-Encoder, Audio-Encoder, Joint-Network로 구성되어 있다.    
 이 때 Label-Encoder는 언어 모델의 역할을 하고 Audio-Encoder는 음향 모델의 역할을 수핸한다.    
@@ -26,7 +26,7 @@ Transformer-Encoder는 max_length가 512이기 때문에 음성의 길이가 아
      
 
 ## RNN-T loss
-![](img/rnn_t.png) <br />
+![](img/rnn_t.png)    
 **C**onnectionist **T**emporal **C**lassification loss와 원리는 비슷하나 CTC loss의 단점을 보완한다.    
 CTC loss의 단점은 크게 두가지로 
 1. 문장을 출력할 떄 문맥을 고려하지 못한다.(음성의 일정 구간에 있는 음소를 "**예측**"만 하지, 앞 뒤 음소의 상관관계를 따지지 않는 문제)    

@@ -58,10 +58,13 @@ class TransducerCollator:
         input_values: list = feature_select("input_values")
         labels: list = feature_select("grapheme_labels")
 
-        batch = self._audio_pad(input_values)
-        labels = self.tokenizer.pad(labels, return_attention_mask=False)
+        labels = [{"input_ids": torch.cat([torch.tensor([0]), tensor["input_ids"]], dim=0)} for tensor in labels]
 
-        batch["labels"] = labels["input_ids"]
+        batch = self._audio_pad(input_values)
+        labels = self.tokenizer.pad(labels, return_attention_mask=True)
+
+        batch["label_values"] = labels["input_ids"]
+        batch["label_attention_mask"] = labels["attention_mask"]
 
         return batch
 
@@ -79,11 +82,12 @@ class TransducerCollator:
         for pad_size, value in zip(difference, input_values):
 
             value_size = value.shape[2]
-            ones = torch.ones([1, chennel_size, value_size])
+            ones = torch.ones([1, value_size])
 
             pad = torch.zeros([1, chennel_size, pad_size], dtype=torch.float64)
+
             value = torch.cat([value, pad], dim=2)
-            mask = torch.cat([ones, pad], dim=2)
+            mask = torch.cat([ones, pad[:, 0, :]], dim=1)
 
             padded_values.append(value)
             attention_masks.append(mask)
@@ -91,8 +95,8 @@ class TransducerCollator:
         attention_mask = torch.cat(attention_masks, dim=0)
 
         result = {
-            "input_vaules": input_values,
-            "attention_mask": attention_mask,
+            "audio_values": input_values.to(torch.float32),
+            "audio_attention_mask": attention_mask.to(torch.float32),
         }
 
         return result

@@ -3,7 +3,7 @@ class TransformerTransducerConfig:
         self.label_layers = 2
         self.audio_layers = 18
 
-        self.hidden_size = 756
+        self.hidden_size = 768
         self.ffn_size = 3072
         self.ffn_dropout = 0.03
         self.ffn_norm_eps = 0.00001
@@ -17,4 +17,4 @@ class TransformerTransducerConfig:
         self.vocab_size = vocab_size
 
         self.loss_reduction = "mean"
-        self.blank_id = 1
+        self.blank_id = 0

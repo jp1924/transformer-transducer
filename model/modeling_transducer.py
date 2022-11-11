@@ -253,7 +253,7 @@ class TransformerTranducer(nn.Module):
 
         self.tanh = nn.Tanh()
         self.dense = nn.Linear(config.ffn_size, config.vocab_size)
-        self.softmax = nn.Softmax(dim=-1)
+        self.log_softmax = nn.LogSoftmax(dim=-1)
 
         self.reduction = config.loss_reduction
         self.blank_id = config.blank_id
@@ -272,14 +272,13 @@ class TransformerTranducer(nn.Module):
 
         hidden_state = self.tanh(joint_vector)
         hidden_state = self.dense(hidden_state)
-        logits = self.softmax(hidden_state)
+        logits = self.log_softmax(hidden_state)
 
         label_len = torch.IntTensor([torch.masked_select(tensor, tensor != 0).shape[0] for tensor in label_values])
+        non_blank_labels = torch.stack([tensor[1:] for tensor in label_values]).to(torch.int32)
         audio_len = torch.IntTensor(
             [torch.masked_select(tensor[0], tensor[0] != 0.0).shape[0] for tensor in audio_values]
         )
-
-        non_blank_labels = torch.stack([tensor[1:] for tensor in label_values]).to(torch.int32)
 
         loss = rnnt_loss(
             logits=logits,

@@ -4,6 +4,16 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel
+from transformers import Trainer
+
+
+class TrnasducerTrainer(Trainer):
+    """
+    RNN-R loss를 사용하는 Transcuder개열의 모델들은 infenrence를 다른 방법으로 진행하기 때문에 evaluate를 다른 방법으로 진행해야 한다.
+    """
+
+    def dummy(self) -> None:
+        raise NotImplementedError
 
 
 class TorchTraner:

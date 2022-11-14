@@ -1,180 +1,153 @@
-import argparse
+import os
+from argparse import Namespace
+from typing import Dict, Tuple, Union
 
+import numpy as np
 import torch
-import wandb
-from datasets import load_dataset
+from data import TransducerCollator, get_concat_dataset
+from datasets import Dataset
+from evaluate import load
+from model import TransformerTranducer, TransformerTransducerConfig
 from setproctitle import setproctitle
-from torch import optim
-from torch.utils.data import DataLoader, DistributedSampler
-from transformers import (
-    HfArgumentParser,
-    Wav2Vec2CTCTokenizer,
-)
-import datasets
-from data import TorchCollator
-from utils import DataArguments, ModelArguments, TrainArguments, get_concat_dataset
-import torch.nn as nn
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel
-
-from model import LabelEncoder, TransformerTransducerConfig
-
-
-def get_parameter_names(model, forbidden_layer_types):
-    """
-    Returns the names of the model parameters that are not inside a forbidden layer.
-    """
-    result = []
-    for name, child in model.named_children():
-        result += [
-            f"{name}.{n}"
-            for n in get_parameter_names(child, forbidden_layer_types)
-            if not isinstance(child, tuple(forbidden_layer_types))
-        ]
-    # Add model specific parameters (defined with nn.Parameter) since they are not in any child.
-    result += list(model._parameters.keys())
-    return result
+from transformers import HfArgumentParser, Seq2SeqTrainingArguments, Trainer, Wav2Vec2Tokenizer, set_seed
+from transformers.integrations import WandbCallback
+from transformers.trainer_utils import is_main_process, EvalPrediction
+from utils import DataArguments, ModelArguments
 
 
 def main(parser: HfArgumentParser) -> None:
     train_args, model_args, data_args, _ = parser.parse_args_into_dataclasses(return_remaining_strings=True)
-    setproctitle("[JP]torch.ver bert")
+    setproctitle(train_args.run_name)
+    set_seed(train_args.seed)
 
-    def preprocess(input_data: datasets.Dataset) -> dict:
-        """각 데이터를 토크나이징 및 별도의 전처리를 적용시키는 함수
-
-        각 데이터의 전처리르 위한 함수 입니다. 이 함수는 datasets으로 부터
-        dict형태의 각 데이터를 입력받아 tokenizer로 인코딩 후 dict형식으로 반환합니다.
-
+    def metrics(evaluation_result: EvalPrediction) -> Dict[str, float]:
+        """_metrics_
+            evaluation과정에서 모델의 성능을 측정하기 위한 metric을 수행하는 함수 입니다.
+            이 함수는 Trainer에 의해 실행되며 Huggingface의 Evaluate 페키로 부터
+            각종 metric을 전달받아 계산한 뒤 결과를 반환합니다.
         Args:
-            input_data (datasets.Dataset): Datasets로 부터 건내받은 dict형식의 각 데이터를 전달 받습니다.
-
+            evaluation_result (EvalPrediction): Trainer.evaluation_loop에서 model을 통해 계산된
+            logits과 label을 전달받습니다.
         Returns:
-            BatchEncoding: Datasets의 각 열의 해당되는 columns를 가지고 전처리 된 데이터를 반환합니다.
+            Dict[str, float]: metrics 계산결과를 dict로 반환합니다.
         """
-        input_text = input_data["document"]
-        output_data = tokenizer(input_text, return_attention_mask=False)
-        output_data["label"] = input_data["label"]
-        return output_data
 
-    data_dir = r"/data/jsb193/audio/logmelspect"
-    loaded_data = get_concat_dataset([data_dir], "train")
+        result = dict()
 
-    tokenizer = Wav2Vec2CTCTokenizer.from_pretrained("test42/wav2vec2-base-4data", use_auth_token=True)
-    config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
-    model = LabelEncoder(config)
+        predicts = evaluation_result.predictions
+        predicts = np.where(predicts != -100, predicts, tokenizer.pad_token_id)
+        predictions = tokenizer.batch_decode(predicts, skip_special_tokens=True)
 
-    # tokenizer = BertTokenizerFast.from_pretrained("klue/bert-base", cache_dir=train_args.cache)
-    # config = BertConfig.from_pretrained(
-    #     "klue/bert-base",
-    #     cache_dir=train_args.cache,
-    #     vocab_size=tokenizer.vocab_size,
-    #     num_labels=model_args.num_labels,
-    #     pad_token_id=tokenizer.pad_token_id,
-    #     # initializer_range=0.2,
-    # )
-    # model = BertForSequenceClassification.from_pretrained("klue/bert-base", cache_dir=train_args.cache, config=config)
+        labels = evaluation_result.label_ids
+        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        references = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
-    if train_args.local_rank != -1:
-        torch.cuda.set_device(train_args.local_rank)
+        wer_score = wer._compute(predictions, references)
 
-        device = torch.device(train_args.local_rank)
-        device_count = torch.cuda.device_count()
-        torch.cuda.set_device(device.index)
-        model = model.to(device)
+        result = {"wer": wer_score}
 
-        model = DistributedDataParallel(
-            model,
-            device_ids=[train_args.local_rank] if device_count != 0 else None,
-            output_device=train_args.local_rank if device_count != 0 else None,
-        )
+        return result
 
-    # loaded_data = load_dataset("nsmc", cache_dir=train_args.cache)
-    # train_data = loaded_data["train"]
-    # valid_data = loaded_data["test"]
+    def logits_for_metrics(logits: Union[Tuple, torch.Tensor], _) -> torch.Tensor:
+        """_logits_for_metrics_
+            Trainer.evaluation_loop에서 사용되는 함수로 logits를 argmax를 이용해
+            축소 시켜 공간복잡도를 줄이기 위한 목적으로 작성되었습니다.
+        Args:
+            logits (Union[Tuple, torch.Tensor]): Model을 거쳐서 나온 3차원 (bch, sqr, hdn)의 logits을 전달받습니다.
+            _ : label이 입력되는 부분이지만 사용되지 않기에 하이픈처리 했습니다.
+        Returns:
+            torch.Tensor: 차원을 축소한 뒤의 torch.Tensor를 반환합니다.
+        """
+        return_logits = logits[0].argmax(dim=-1)
+        return return_logits
 
-    # train_data = train_data.map(preprocess, num_proc=5)
-    # valid_data = valid_data.map(preprocess, num_proc=5)
+    tokenizer = Wav2Vec2Tokenizer.from_pretrained("test42/wav2vec2-base-4data", use_auth_token=True)
+    config = TransformerTransducerConfig(tokenizer.vocab_size)
+    model = TransformerTranducer(config)
 
-    # train_data = train_data.remove_columns(["id", "document"])
-    # valid_data = valid_data.remove_columns(["id", "document"])
+    train_data = get_concat_dataset([data_args.data_name], "train") if train_args.do_train else None
+    valid_data = get_concat_dataset([data_args.data_name], "dev") if train_args.do_eval else None
+    test_data = get_concat_dataset([data_args.data_name], "eval_other") if train_args.do_predict else valid_data
 
-    if train_args.local_rank != -1:
-        sampler = DistributedSampler(
-            dataset=train_data,
-            num_replicas=2,
-            rank=train_args.local_rank,
-            shuffle=False,
-            seed=42,
-            drop_last=False,
-        )
-    generator = torch.Generator()
-    generator.manual_seed(42)
+    wer = load("evaluate-metric/wer")
 
-    collator = TorchCollator(pad=0, device=train_args.local_rank)
+    collator = TransducerCollator(tokenizer)
+    callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
 
-    train_dataloader = DataLoader(
-        dataset=train_data,
-        batch_size=train_args.train_batch_size,
-        shuffle=False,
-        # sampler=sampler,
-        batch_sampler=None,
-        collate_fn=collator,
-        pin_memory=True,
-        generator=generator,
+    trainer = Trainer(
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=train_data,
+        eval_dataset=valid_data,
+        args=train_args,
+        compute_metrics=metrics,
+        data_collator=collator,
+        callbacks=callbacks,
+        preprocess_logits_for_metrics=logits_for_metrics,
     )
-    valid_dataloader = DataLoader(
-        dataset=valid_data,
-        batch_size=train_args.valid_batch_size,
-        shuffle=False,
-        batch_sampler=None,
-        collate_fn=None,
-        pin_memory=True,
-    )
+    if train_args.do_train:
+        train(trainer, train_args)
+    if train_args.do_eval:
+        eval(trainer, valid_data, train_args)
+    if train_args.do_predict:
+        predict(trainer, test_data)
 
-    loss_func = nn.CrossEntropyLoss()
 
-    optimizer = optim.AdamW(model.parameters(), train_args.learning_rate)
-    model.zero_grad()
+def train(trainer: Trainer, args: Namespace) -> None:
+    """_train_
+        Trainer를 전달받아 Trainer.train을 실행시키는 함수입니다.
+        학습이 끝난 이후 학습 결과 그리고 최종 모델을 저장하는 기능도 합니다.
+        만약 학습을 특정 시점에 재시작 하고 싶다면 Seq2SeqTrainingArgument의
+        resume_from_checkpoint을 True혹은 PathLike한 값을 넣어주세요.
+        - huggingface.trainer.checkpoint
+        https://huggingface.co/docs/transformers/main_classes/trainer#checkpoints
+    Args:
+        trainer (Seq2SeqTrainer): Huggingface의 torch Seq2SeqTrainer를 전달받습니다.
+        args (Namespace): Seq2SeqTrainingArgument를 전달받습니다.
+    """
+    outputs = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    if is_main_process(args.local_rank):
+        model_name = trainer.model.name_or_path
+        save_path = os.path.join(args.output_dir, model_name)
 
-    for epoch in range(1, (train_args.train_epochs + 1)):
-        # set_epoch는 sampler의 shuffle이 True일 때를 위한 함수다.
-        # 만약 set_epoch이 설정되지 않았다면 매 epoch마다 동일한 데이터가 들어갈 수 있다.
-        # random_seed를 설정할 때 seed + epoch으로 seed를 설정하기 때문에 shuffle시 중요한 요소
-        # train_dataloader.sampler.set_epoch(epoch)
-        model.train()
-        for step, train_data in enumerate(train_dataloader, 1):
-            if train_args.local_rank != -1:
-                train_data = {key: data.to(train_args.local_rank) for key, data in train_data.items()}
-                with model.no_sync():
-                    outputs = model(**train_data)
-            else:
-                train_data = {key: data for key, data in train_data.items()}
-                input_data = train_data["input_ids"]
-                attention_mask = train_data["attention_mask"]
-                token_type_ids = train_data["token_type_ids"]
-                logits = model(input_data, attention_mask, token_type_ids)
-            # logits = outputs.logits
-            loss = loss_func(logits, train_data["labels"])
-            # loss = rnnt_loss()
-            loss = loss / train_args.train_accumulate
-            loss.backward()
-            # scheduler.step()
-            if (step % train_args.train_accumulate) == 0:
-                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                model.zero_grad()
+        if not os.path.exists(save_path):
+            os.makedirs(save_path, exist_ok=True)
 
-                print(f"step: {step*epoch}: {loss}")
-                print
+        metrics = outputs.metrics
+        trainer.args.output_dir = save_path
 
-            if (step % train_args.valid_step) == 0:
+        trainer.log_metrics("train", metrics)
+        trainer.save_metrics("train", metrics)
+        trainer.save_model(save_path)
 
-                with torch.no_grad():
-                    for step, valid_data in enumerate(range(valid_dataloader)):
-                        pass
+
+def eval(trainer: Trainer, eval_data: Dataset, args: Namespace) -> None:
+    """_eval_
+        Trainer를 전달받아 Trainer.eval을 실행시키는 함수입니다.
+    Args:
+        trainer (Seq2SeqTrainer): Huggingface의 torch Seq2SeqTrainer를 전달받습니다.
+        eval_data (Dataset): 검증을 하기 위한 Data를 전달받습니다.
+    """
+    metrics = trainer.evaluate(eval_data)
+    if is_main_process(args.local_rank):
+        trainer.log_metrics("eval", metrics)
+        trainer.save_metrics("eval", metrics)
+
+
+def predict(trainer: Trainer, test_data: Dataset) -> None:
+    """_predict_
+        Trainer를 전달받아 Trainer.predict을 실행시키는 함수입니다.
+        이때 Seq2SeqTrainer의 Predict이 실행되며 model.generator를 실행시키기 위해
+        arg값의 predict_with_generater값을 강제로 True로 변환시킵니다.
+        True로 변환시키면 model.generator에서 BeamSearch를 진행해 더 질이 좋은 결과물을 만들 수 있습니다.
+    Args:
+        trainer (Seq2SeqTrainer): Huggingface의 torch Seq2SeqTrainer를 전달받습니다.
+        test_data (Dataset): 검증을 하기 위한 Data를 전달받습니다.
+        gen_kwargs (Dict[str, Any]): model.generator를 위한 값들을 전달받습니다.
+    """
+    raise NotImplementedError
 
 
 if "__main__" in __name__:
-    parser = HfArgumentParser([TrainArguments, ModelArguments, DataArguments])
+    parser = HfArgumentParser([Seq2SeqTrainingArguments, DataArguments, ModelArguments])
     main(parser)

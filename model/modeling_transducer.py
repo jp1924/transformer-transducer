@@ -158,6 +158,7 @@ class LabelEncoder(nn.Module):
         attention_mask = attention_mask.transpose(1, 0)
 
         position_ids = self.position_ids[: label_data.shape[1]]
+        position_ids = position_ids.to(label_data.device)
         position_embed = self.position_embedding(position_ids)
         word_embed = self.word_embedding(label_data)
 
@@ -200,7 +201,8 @@ class AudioEncoder(nn.Module):
         attention_mask = attention_mask.transpose(1, 0)
 
         seq_len = audio_inputs.shape[1]
-        position_embed = self.test_embedding(self.test_ids[:seq_len])
+        length_ids = self.test_ids[:seq_len].to(audio_inputs.device)
+        position_embed = self.test_embedding(length_ids)
 
         position_embed = position_embed.unsqueeze(0)
 
@@ -279,6 +281,10 @@ class TransformerTranducer(nn.Module):
         audio_len = torch.IntTensor(
             [torch.masked_select(tensor[0], tensor[0] != 0.0).shape[0] for tensor in audio_values]
         )
+
+        label_len = label_len.to(label_values.device)
+        audio_len = audio_len.to(audio_values.device)
+        non_blank_labels = non_blank_labels.to(label_values.device)
 
         loss = rnnt_loss(
             logits=logits,

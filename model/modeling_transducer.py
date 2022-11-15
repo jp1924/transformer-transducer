@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
-import math
-from .config import TransformerTransducerConfig
+from .config import TestConfig, TransformerTransducerConfig
 from torchaudio.functional import rnnt_loss
+from transformers.utils import ModelOutput
+
 
 """
     [NOTE]
@@ -14,8 +15,13 @@ from torchaudio.functional import rnnt_loss
 """
 
 
+class TransducerOuput(ModelOutput):
+    loss: torch.FloatTensor = None
+    logits: torch.FloatTensor = None
+
+
 class SelfAttention(nn.Module):
-    def __init__(self, config: TransformerTransducerConfig) -> None:
+    def __init__(self, config: TestConfig) -> None:
         super(SelfAttention, self).__init__()
         # self.query_ = nn.Linear()
         # self.key = nn.Linear()
@@ -52,7 +58,7 @@ class SelfAttention(nn.Module):
 
 
 class FeedForwardNetwork(nn.Module):
-    def __init__(self, config: TransformerTransducerConfig) -> None:
+    def __init__(self, config: TestConfig) -> None:
         super(FeedForwardNetwork, self).__init__()
         self.dense = nn.Linear(config.hidden_size, config.ffn_size)
         self.activation = nn.GELU()
@@ -66,7 +72,7 @@ class FeedForwardNetwork(nn.Module):
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, config: TransformerTransducerConfig) -> None:
+    def __init__(self, config: TestConfig) -> None:
         super(EncoderLayer, self).__init__()
         self.attn = SelfAttention(config)
         self.attn_norm = nn.LayerNorm(config.hidden_size, eps=config.attn_norm_eps)
@@ -93,7 +99,7 @@ class EncoderLayer(nn.Module):
 
 
 class TestEncoder(nn.Module):
-    def __init__(self, config: TransformerTransducerConfig) -> None:
+    def __init__(self, config: TestConfig) -> None:
         super(TestEncoder, self).__init__()
         layer_list = [EncoderLayer(config) for _ in range(config.label_layers)]
         self.encoder = nn.ModuleList(layer_list)
@@ -205,10 +211,6 @@ class AudioEncoder(nn.Module):
         position_embed = self.test_embedding(length_ids)
 
         position_embed = position_embed.unsqueeze(0)
-
-        # [NOTE]
-        # audio_inputs를 linear를 통과시킨 뒤의 embed 값과 합텨야할까? 아님 그냥 합쳐야 할까?
-
         audio_inputs = self.linear(audio_inputs)
 
         audio_inputs = audio_inputs + position_embed
@@ -296,4 +298,4 @@ class TransformerTranducer(nn.Module):
             reduction=self.reduction,
         )
 
-        return loss
+        return TransducerOuput(loss=loss, logits=logits)

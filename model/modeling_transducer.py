@@ -264,29 +264,29 @@ class TransformerTranducer(nn.Module):
 
     def forward(
         self,
-        audio_values: torch.Tensor,
-        label_values: torch.Tensor,
+        input_values: torch.Tensor,
+        labels: torch.Tensor,
         audio_attention_mask: torch.Tensor,
         label_attention_mask: torch.Tensor,
     ) -> torch.Tensor:
 
-        audio_vector = self.audio_encoder(audio_values, audio_attention_mask)
-        label_vector = self.label_encoder(label_values, label_attention_mask)
+        audio_vector = self.audio_encoder(input_values, audio_attention_mask)
+        label_vector = self.label_encoder(labels, label_attention_mask)
         joint_vector = self.joint_network(audio_vector, label_vector)
 
         hidden_state = self.tanh(joint_vector)
         hidden_state = self.dense(hidden_state)
         logits = self.log_softmax(hidden_state)
 
-        label_len = torch.IntTensor([torch.masked_select(tensor, tensor != 0).shape[0] for tensor in label_values])
-        non_blank_labels = torch.stack([tensor[1:] for tensor in label_values]).to(torch.int32)
+        label_len = torch.IntTensor([torch.masked_select(tensor, tensor != 0).shape[0] for tensor in labels])
+        non_blank_labels = torch.stack([tensor[1:] for tensor in labels]).to(torch.int32)
         audio_len = torch.IntTensor(
-            [torch.masked_select(tensor[0], tensor[0] != 0.0).shape[0] for tensor in audio_values]
+            [torch.masked_select(tensor[0], tensor[0] != 0.0).shape[0] for tensor in input_values]
         )
 
-        label_len = label_len.to(label_values.device)
-        audio_len = audio_len.to(audio_values.device)
-        non_blank_labels = non_blank_labels.to(label_values.device)
+        label_len = label_len.to(labels.device)
+        audio_len = audio_len.to(input_values.device)
+        non_blank_labels = non_blank_labels.to(labels.device)
 
         loss = rnnt_loss(
             logits=logits,

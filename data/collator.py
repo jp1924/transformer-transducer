@@ -11,16 +11,16 @@ class TorchCollator:
 
     def __call__(self, features) -> None:
         token_type_ids = [torch.tensor(dataset["token_type_ids"]) for dataset in features]
-        input_ids = [torch.tensor(dataset["input_ids"]) for dataset in features]
+        input_values = [torch.tensor(dataset["input_values"]) for dataset in features]
         labels = [dataset["label"] for dataset in features]
 
         token_type_ids = pad_sequence(token_type_ids, batch_first=True, padding_value=self.pad)
-        input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.pad)
+        input_values = pad_sequence(input_values, batch_first=True, padding_value=self.pad)
         labels = torch.tensor(labels)
 
         batch = {
-            "input_ids": input_ids,
-            "attention_mask": (input_ids != 0).type(torch.long),
+            "input_values": input_values,
+            "attention_mask": (input_values != 0).type(torch.long),
             "labels": labels,
             "token_type_ids": token_type_ids,
         }
@@ -56,14 +56,16 @@ class TransducerCollator:
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         feature_select: str = lambda key: [feature[key] for feature in features]
         input_values: list = feature_select("input_values")
-        labels: list = feature_select("grapheme_labels")
+        labels: list = feature_select("labels")
 
-        labels = [{"input_ids": torch.cat([torch.tensor([0]), tensor["input_ids"]], dim=0)} for tensor in labels]
+        labels = [
+            {"input_values": torch.cat([torch.tensor([0]), tensor["input_ids"][:511]], dim=0)} for tensor in labels
+        ]
 
         batch = self._audio_pad(input_values)
         labels = self.tokenizer.pad(labels, return_attention_mask=True)
 
-        batch["label_values"] = labels["input_ids"]
+        batch["labels"] = labels["input_values"]
         batch["label_attention_mask"] = labels["attention_mask"]
 
         return batch
@@ -95,7 +97,7 @@ class TransducerCollator:
         attention_mask = torch.cat(attention_masks, dim=0)
 
         result = {
-            "audio_values": input_values.to(torch.float32),
+            "input_values": input_values.to(torch.float32),
             "audio_attention_mask": attention_mask.to(torch.float32),
         }
 

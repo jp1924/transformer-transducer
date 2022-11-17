@@ -269,6 +269,7 @@ class TransformerTranducer(nn.Module):
         audio_attention_mask: torch.Tensor,
         label_attention_mask: torch.Tensor,
     ) -> torch.Tensor:
+        labels = labels.to(torch.int64)
 
         audio_vector = self.audio_encoder(input_values, audio_attention_mask)
         label_vector = self.label_encoder(labels, label_attention_mask)
@@ -297,5 +298,5 @@ class TransformerTranducer(nn.Module):
             clamp=-1,
             reduction=self.reduction,
         )
-
+        torch.cuda.empty_cache()
         return TransducerOuput(loss=loss, logits=logits)

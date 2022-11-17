@@ -7,16 +7,17 @@ import torch
 from data import TransducerCollator, get_concat_dataset
 from datasets import Dataset
 from evaluate import load
-from model import TransformerTranducer, TransformerTransducerConfig
+from model import TransformerTranducer, TransformerTransducerConfig, TestConfig
 from setproctitle import setproctitle
 from transformers import HfArgumentParser, Seq2SeqTrainingArguments, Trainer, Wav2Vec2Tokenizer, set_seed
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import is_main_process, EvalPrediction
 from utils import DataArguments, ModelArguments
+from trainer import TrnasducerTrainer
 
 
 def main(parser: HfArgumentParser) -> None:
-    train_args, model_args, data_args, _ = parser.parse_args_into_dataclasses(return_remaining_strings=True)
+    train_args, data_args, model_args, _ = parser.parse_args_into_dataclasses(return_remaining_strings=True)
     setproctitle(train_args.run_name)
     set_seed(train_args.seed)
 
@@ -58,23 +59,27 @@ def main(parser: HfArgumentParser) -> None:
         Returns:
             torch.Tensor: 차원을 축소한 뒤의 torch.Tensor를 반환합니다.
         """
-        return_logits = logits[0].argmax(dim=-1)
+        return_logits = logits.argmax(dim=-1)
         return return_logits
 
-    tokenizer = Wav2Vec2Tokenizer.from_pretrained("test42/wav2vec2-base-4data", use_auth_token=True)
+    tokenizer = Wav2Vec2Tokenizer.from_pretrained("test42/kerberus2", use_auth_token=True)
     config = TransformerTransducerConfig(tokenizer.vocab_size)
     model = TransformerTranducer(config)
 
+    # [NOTE]: temp
     train_data = get_concat_dataset([data_args.data_name], "train") if train_args.do_train else None
     valid_data = get_concat_dataset([data_args.data_name], "dev") if train_args.do_eval else None
     test_data = get_concat_dataset([data_args.data_name], "eval_other") if train_args.do_predict else valid_data
+
+    train_data = train_data.rename_column("grapheme_labels", "labels") if train_args.do_train else None
+    valid_data = valid_data.rename_column("grapheme_labels", "labels") if train_args.do_eval else None
 
     wer = load("evaluate-metric/wer")
 
     collator = TransducerCollator(tokenizer)
     callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
 
-    trainer = Trainer(
+    trainer = TrnasducerTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_data,

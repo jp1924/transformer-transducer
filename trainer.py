@@ -1,19 +1,21 @@
 from argparse import Namespace
+from typing import List, Optional
+
+import numpy as np
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DataLoader
 from transformers import Trainer
-from transformers.trainer_utils import (
-    EvalLoopOutput,
-    is_torch_tpu_available,
-    has_length,
-    is_main_process,
-)
-from transformers.trainer_pt_utils import find_batch_size
+from transformers.deepspeed import deepspeed_init, is_deepspeed_zero3_enabled
+from transformers.trainer_pt_utils import (IterableDatasetShard,
+                                           find_batch_size, nested_concat,
+                                           nested_numpify, nested_truncate)
+from transformers.trainer_utils import (EvalLoopOutput, EvalPrediction,
+                                        denumpify_detensorize, has_length,
+                                        is_main_process,
+                                        is_torch_tpu_available)
 from transformers.utils import logging
-from typing import Optional, List
-from tqdm import tqdm
 
 if is_torch_tpu_available(check_device=False):
     import torch_xla.core.xla_model as xm
@@ -124,13 +126,17 @@ class TrnasducerTrainer(Trainer):
             device = torch.device(dist.get_rank())
             shape = torch.tensor(logits.shape, device=device)
             shape_outputs = [shape.clone() for _ in range(dist.get_world_size())]
-            
+
             dist.all_gather(shape_outputs, shape)
-            
-            device_shape = torch.stack(shape_outputs).T # [NOTE]: transpose
+
+            device_shape = torch.stack(shape_outputs).T  # [NOTE]: transpose
             max_size = torch.stack([torch.max(x) for x in device_shape])
-            
-            pad_tensor = torch.zeros(max_size.tolist())
+
+            pad_tensor = torch.zeros(max_size.tolist(), device=device)
+
+            pad_tensor[:logits.shape[0], :logits.shape[1], :logits.shape[2], :logits.shape[3]] = logits
+
+            logits = pad_tensor
 
             # Update containers on host
             if loss is not None:
@@ -249,6 +255,8 @@ class TrnasducerTrainer(Trainer):
                 metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
 
         return EvalLoopOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics, num_samples=num_samples)
+
+
 
 class TorchTraner:
     def __init__(self, model, optimizer, tokenizer, train_data, valid_data, collator, args: Namespace) -> None:

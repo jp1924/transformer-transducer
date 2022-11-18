@@ -122,6 +122,18 @@ class TrnasducerTrainer(Trainer):
                 xm.mark_step()
 
             # [NOTE]: 작업 중
+            # [BUG]: RuntimeError: Detected mismatch between collectives on ranks. 
+            #        Rank 0 is running inconsistent collective: 
+            #        CollectiveFingerPrint(OpType=BROADCAST, 
+            #                              TensorShape=[34112], 
+            #                              TensorDtypes=Float, 
+            #                              TensorDeviceTypes=TensorOptions(dtype=float (default), 
+            #                              device=cuda, layout=Strided (default), 
+            #                              requires_grad=false (default), 
+            #                              pinned_memory=false (default), 
+            #                              memory_format=(nullopt)
+            #                           )
+
             # [NOTE]: logits must be (batch, mel, seq, prob)
             device = torch.device(dist.get_rank())
             shape = torch.tensor(logits.shape, device=device)

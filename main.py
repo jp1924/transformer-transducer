@@ -7,7 +7,7 @@ import torch
 from data import TransducerCollator, get_concat_dataset
 from datasets import Dataset
 from evaluate import load
-from model import TransformerTranducer, TransformerTransducerConfig, TestConfig
+from model import TransformerTranducer, TransformerTransducerConfig
 from setproctitle import setproctitle
 from transformers import HfArgumentParser, Seq2SeqTrainingArguments, Trainer, Wav2Vec2Tokenizer, set_seed
 from transformers.integrations import WandbCallback
@@ -44,6 +44,8 @@ def main(parser: HfArgumentParser) -> None:
         references = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
         wer_score = wer._compute(predictions, references)
+
+
 
         result = {"wer": wer_score}
 

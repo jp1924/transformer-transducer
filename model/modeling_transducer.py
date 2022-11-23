@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .config import TestConfig, TransformerTransducerConfig
+from .config import TransformerTransducerConfig
 from torchaudio.functional import rnnt_loss
 from transformers.utils import ModelOutput
 

@@ -3,8 +3,9 @@ import torch.nn as nn
 from .config import TransformerTransducerConfig
 from torchaudio.functional import rnnt_loss
 from transformers.utils import ModelOutput
+from accelerate import Accelerator
 
-
+accelerator = Accelerator()
 """
     [NOTE]
     스스로 재작한 Transformer Encoder를 검증하기 위한 실험,
@@ -21,7 +22,7 @@ class TransducerOuput(ModelOutput):
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, config: TestConfig) -> None:
+    def __init__(self, config: TransformerTransducerConfig) -> None:
         super(SelfAttention, self).__init__()
         # self.query_ = nn.Linear()
         # self.key = nn.Linear()
@@ -58,7 +59,7 @@ class SelfAttention(nn.Module):
 
 
 class FeedForwardNetwork(nn.Module):
-    def __init__(self, config: TestConfig) -> None:
+    def __init__(self, config: TransformerTransducerConfig) -> None:
         super(FeedForwardNetwork, self).__init__()
         self.dense = nn.Linear(config.hidden_size, config.ffn_size)
         self.activation = nn.GELU()
@@ -72,7 +73,7 @@ class FeedForwardNetwork(nn.Module):
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, config: TestConfig) -> None:
+    def __init__(self, config: TransformerTransducerConfig) -> None:
         super(EncoderLayer, self).__init__()
         self.attn = SelfAttention(config)
         self.attn_norm = nn.LayerNorm(config.hidden_size, eps=config.attn_norm_eps)
@@ -99,7 +100,7 @@ class EncoderLayer(nn.Module):
 
 
 class TestEncoder(nn.Module):
-    def __init__(self, config: TestConfig) -> None:
+    def __init__(self, config: TransformerTransducerConfig) -> None:
         super(TestEncoder, self).__init__()
         layer_list = [EncoderLayer(config) for _ in range(config.label_layers)]
         self.encoder = nn.ModuleList(layer_list)
@@ -160,7 +161,6 @@ class LabelEncoder(nn.Module):
         label_data: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-
         attention_mask = attention_mask.transpose(1, 0)
 
         position_ids = self.position_ids[: label_data.shape[1]]
@@ -168,7 +168,7 @@ class LabelEncoder(nn.Module):
         position_embed = self.position_embedding(position_ids)
         word_embed = self.word_embedding(label_data)
 
-        input_embed = position_embed + word_embed
+        input_embed = word_embed + position_embed
 
         outputs = self.encoder(input_embed, src_key_padding_mask=attention_mask)
 
@@ -204,17 +204,17 @@ class AudioEncoder(nn.Module):
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         audio_inputs = audio_inputs.transpose(1, 2)
-        attention_mask = attention_mask.transpose(1, 0)
+        # attention_mask = attention_mask.transpose(1, 0)
 
-        seq_len = audio_inputs.shape[1]
-        length_ids = self.test_ids[:seq_len].to(audio_inputs.device)
-        position_embed = self.test_embedding(length_ids)
+        # seq_len = audio_inputs.shape[1]
+        # length_ids = self.test_ids[:seq_len].to(audio_inputs.device)
+        # position_embed = self.test_embedding(length_ids)
 
-        position_embed = position_embed.unsqueeze(0)
+        # position_embed = position_embed.unsqueeze(0)
         audio_inputs = self.linear(audio_inputs)
 
-        audio_inputs = audio_inputs + position_embed
-        outputs = self.encoder(audio_inputs, src_key_padding_mask=attention_mask)
+        # audio_inputs = audio_inputs + position_embed
+        outputs = self.encoder(audio_inputs)  # , src_key_padding_mask=attention_mask)
 
         return outputs
 
@@ -299,4 +299,6 @@ class TransformerTranducer(nn.Module):
             reduction=self.reduction,
         )
         torch.cuda.empty_cache()
+        test_1 = accelerator.pad_across_processes(logits, 1)
+        test_2 = accelerator.pad_across_processes(test_1, 2)
         return TransducerOuput(loss=loss, logits=logits)

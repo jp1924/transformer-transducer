@@ -1,6 +1,6 @@
 datasets==2.6.1
 transformers==4.23.1
-evaluate=0.3.0
+evaluate==0.3.0
 wandb==0.13.4
 jiwer
 setproctitle

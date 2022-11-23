@@ -3,7 +3,6 @@ from torch.nn.utils.rnn import pad_sequence
 import torch
 from typing import List, Dict, Any
 
-
 class TorchCollator:
     def __init__(self, pad: int = None, device: int = None) -> None:
         self.pad = pad
@@ -62,7 +61,7 @@ class TransducerCollator:
             {"input_values": torch.cat([torch.tensor([0]), tensor["input_ids"][:511]], dim=0)} for tensor in labels
         ]
 
-        batch = self._audio_pad(input_values)
+        batch = self._audio_pad_1(input_values)
         labels = self.tokenizer.pad(labels, return_attention_mask=True)
 
         batch["labels"] = labels["input_values"]
@@ -70,7 +69,7 @@ class TransducerCollator:
 
         return batch
 
-    def _audio_pad(self, input_values: List[torch.Tensor]) -> torch.Tensor:
+    def _audio_pad_1(self, input_values: List[torch.Tensor]) -> torch.Tensor:
         chennel_size = input_values[0].shape[1]
 
         # [NOTE]: cutting by max_length
@@ -99,6 +98,35 @@ class TransducerCollator:
         result = {
             "input_values": input_values.to(torch.float32),
             "audio_attention_mask": attention_mask.to(torch.float32),
+        }
+
+        return result
+
+    def _audio_pad_2(self, input_values: List[torch.Tensor]) -> torch.Tensor:
+        return_result = list()
+        input_values = [value[:, :, : self.max_length] for value in input_values]
+        max_size = max([value.shape[2] for value in input_values])
+
+        difference = [max_size - value.shape[2] for value in input_values]
+        chennel_size = input_values[0].shape[1]
+        padded_values = list()
+        for pad_size, value in zip(difference, input_values):
+            pad = torch.zeros([1, chennel_size, pad_size], dtype=torch.float64)
+            value = torch.cat([value, pad], dim=2)
+            padded_values.append(value)
+        audios = torch.cat(padded_values, dim=0)
+
+        for audio in input_values:
+            seq_len = audio.size(1)
+            up = torch.triu(audio.new_ones([seq_len, seq_len]), diagonal=2 + 1)
+            down = torch.tril(audio.new_ones([seq_len, seq_len]), diagonal=-10 - 1)
+            attention_mask = up + down
+            return_result.append(attention_mask)
+        return_result = torch.stack(return_result)
+
+        result = {
+            "input_values": audios.to(torch.float32),
+            "audio_attention_mask": return_result.to(torch.float32),
         }
 
         return result

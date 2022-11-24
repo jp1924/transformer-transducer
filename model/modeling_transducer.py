@@ -248,12 +248,11 @@ class AudioEncoder(nn.Module):
 
     def forward(
         self,
-        audio_inputs: torch.Tensor,
+        hidden_state: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        audio_inputs = audio_inputs.transpose(1, 2)
-
-        hidden_state = self.linear(audio_inputs)
+        # audio_inputs = audio_inputs.transpose(1, 2)
+        # hidden_state = self.linear(audio_inputs)
 
         for layer in self.audio_layers:
             hidden_state = layer(hidden_state, attention_mask)
@@ -288,7 +287,7 @@ class JointNetwork(nn.Module):
         return hidden_state
 
 
-class TransducerModel(nn.Moduel):
+class TransducerModel(nn.Module):
     def __init__(self, config: TransformerTransducerConfig) -> None:
         self.audio_encoder = AudioEncoder(config)
         self.label_encoder = LabelEncoder(config)

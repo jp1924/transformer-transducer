@@ -3,6 +3,7 @@ from torch.nn.utils.rnn import pad_sequence
 import torch
 from typing import List, Dict, Any
 
+
 class TorchCollator:
     def __init__(self, pad: int = None, device: int = None) -> None:
         self.pad = pad
@@ -105,7 +106,8 @@ class TransducerCollator:
     def _audio_pad_2(self, input_values: List[torch.Tensor]) -> torch.Tensor:
         return_result = list()
         input_values = [value[:, :, : self.max_length] for value in input_values]
-        max_size = max([value.shape[2] for value in input_values])
+        # max_size = max([value.shape[2] for value in input_values])
+        max_size = 504
 
         difference = [max_size - value.shape[2] for value in input_values]
         chennel_size = input_values[0].shape[1]

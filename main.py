@@ -7,7 +7,7 @@ import torch
 from data import TransducerCollator, get_concat_dataset
 from datasets import Dataset
 from evaluate import load
-from model import TransformerTranducer, TransformerTransducerConfig
+from model import TransformerTranducerForRNNT, TransformerTransducerConfig
 from setproctitle import setproctitle
 from transformers import HfArgumentParser, Seq2SeqTrainingArguments, Trainer, Wav2Vec2Tokenizer, set_seed
 from transformers.integrations import WandbCallback
@@ -45,8 +45,6 @@ def main(parser: HfArgumentParser) -> None:
 
         wer_score = wer._compute(predictions, references)
 
-
-
         result = {"wer": wer_score}
 
         return result
@@ -66,7 +64,7 @@ def main(parser: HfArgumentParser) -> None:
 
     tokenizer = Wav2Vec2Tokenizer.from_pretrained("test42/kerberus2", use_auth_token=True)
     config = TransformerTransducerConfig(tokenizer.vocab_size)
-    model = TransformerTranducer(config)
+    model = TransformerTranducerForRNNT(config)
 
     # [NOTE]: temp
     train_data = get_concat_dataset([data_args.data_name], "train") if train_args.do_train else None
@@ -87,7 +85,7 @@ def main(parser: HfArgumentParser) -> None:
         train_dataset=train_data,
         eval_dataset=valid_data,
         args=train_args,
-        compute_metrics=metrics,
+        # compute_metrics=metrics,
         data_collator=collator,
         callbacks=callbacks,
         preprocess_logits_for_metrics=logits_for_metrics,

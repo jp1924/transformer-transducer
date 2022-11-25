@@ -64,6 +64,6 @@ def get_concat_dataset(dataset_dirs: List[os.PathLike], train_type: str) -> Data
         sharding_datasets = [load_from_disk(p) for p in tqdm(sharding_dataset_paths)]
         dataset_lists.extend(sharding_datasets)
     for dataset in dataset_lists:
-        dataset.set_format("torch")
+        dataset.set_format("numpy")
     concat_dataset = concatenate_datasets(dataset_lists)
     return concat_dataset

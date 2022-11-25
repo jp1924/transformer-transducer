@@ -3,13 +3,42 @@ import torch.nn as nn
 from torchaudio.functional import rnnt_loss
 from transformers.activations import ACT2FN
 from transformers.utils import ModelOutput
+from transformers.modeling_utils import PreTrainedModel
 import math
 from typing import Optional, Tuple
-
+import warnings
 from .config import TransformerTransducerConfig
 
 # from accelerate import Accelerator
 # accelerator = Accelerator()
+
+
+class TransducerPretrainedModel(PreTrainedModel):
+    config_class = TransformerTransducerConfig
+    base_model_prefix = "transformertransducer"
+    main_input_name = "input_values"
+    _keys_to_ignore_on_load_missing = [r"position_ids"]
+    supports_gradient_checkpointing = True
+
+    def _init_weights(self, module):
+        """Initialize the weights"""
+        if isinstance(module, nn.Linear):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def _set_gradient_checkpointing(self, module, value=False):
+        if isinstance(module, TransducerEncoderLayer):
+            module.gradient_checkpointing = value
 
 
 class TransducerOuput(ModelOutput):
@@ -137,8 +166,8 @@ class TransducerSelfAttention(nn.Module):
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
-        if self.is_decoder:
-            outputs = outputs + (past_key_value,)
+        # if self.is_decoder:
+        #     outputs = outputs + (past_key_value,)
         return outputs
 
 
@@ -185,7 +214,7 @@ class TransducerEncoderLayer(nn.Module):
     ) -> torch.Tensor:
         attn_residual = hidden_states
         hidden_states = self.attention(hidden_states, attention_mask=attention_mask)
-        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.dropout(hidden_states[0])
         hidden_states = attn_residual + hidden_states
         hidden_states = self.layer_norm(hidden_states)
         """
@@ -218,8 +247,6 @@ class LabelEncoder(nn.Module):
         label_data: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        attention_mask = attention_mask.transpose(1, 0)
-
         position_ids = self.position_ids[: label_data.shape[1]]
         position_ids = position_ids.to(label_data.device)
         position_embed = self.position_embedding(position_ids)
@@ -227,7 +254,7 @@ class LabelEncoder(nn.Module):
 
         hidden_state = word_embed + position_embed
 
-        for layer in self.audio_layers:
+        for layer in self.label_layers:
             hidden_state = layer(hidden_state, attention_mask)
 
         return hidden_state
@@ -235,7 +262,7 @@ class LabelEncoder(nn.Module):
 
 class AudioEncoder(nn.Module):
     def __init__(self, config: TransformerTransducerConfig) -> None:
-        super().__init__()
+        super(AudioEncoder, self).__init__()
         # self.position_embedding = PositionalEncoding(config.hidden_size)
 
         self.test_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
@@ -264,7 +291,7 @@ class JointNetwork(nn.Module):
     def __init__(self, config: TransformerTransducerConfig) -> None:
         super().__init__()
         concat_size = config.hidden_size * 2
-        self.dense = nn.Linear(concat_size, config.ffn_size)
+        self.dense = nn.Linear(concat_size, config.hidden_size)
 
     def forward(
         self,
@@ -287,15 +314,18 @@ class JointNetwork(nn.Module):
         return hidden_state
 
 
-class TransducerModel(nn.Module):
+class TransducerModel(TransducerPretrainedModel):
     def __init__(self, config: TransformerTransducerConfig) -> None:
+        super(TransducerPretrainedModel, self).__init__(config)
         self.audio_encoder = AudioEncoder(config)
         self.label_encoder = LabelEncoder(config)
         self.joint_network = JointNetwork(config)
 
         self.tanh = nn.Tanh()
-        self.dense = nn.Linear(config.ffn_size, config.vocab_size)
+        self.dense = nn.Linear(config.hidden_size, config.vocab_size)
         self.log_softmax = nn.LogSoftmax(dim=-1)
+
+        self.eval_count = 0
 
     def forward(
         self,
@@ -307,6 +337,12 @@ class TransducerModel(nn.Module):
         return_dict: Optional[bool] = None,
         labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        input_shape = input_values.size()
+        audio_attention_mask = self.get_extended_attention_mask(audio_attention_mask, input_shape)
+
+        input_shape = labels.size()
+        label_attention_mask = self.get_extended_attention_mask(label_attention_mask, input_shape)
+
         audio_outputs = self.audio_encoder(input_values, audio_attention_mask)
         label_outputs = self.label_encoder(labels, label_attention_mask)
         joint_output = self.joint_network(audio_outputs, label_outputs)
@@ -315,11 +351,50 @@ class TransducerModel(nn.Module):
         hidden_state = self.dense(hidden_state)
         logits = self.log_softmax(hidden_state)
 
+        if self.training:
+            self.eval_count += 1
+
+        if self.training and self.eval_count == 4:
+            self.recognize
+
         return logits
+
+    def recognize(self, inputs, inputs_length=None, audio_mask=None):
+
+        batch_size = inputs.size(0)
+        enc_states = self.audio_encoder(inputs, audio_mask)
+
+        results = []
+        for batch in range(batch_size):
+            decoded_seq = self.decode(enc_states[batch], inputs_length[batch])
+            results.append(decoded_seq)
+        return results
+
+    def decode(self, enc_state, lengths):
+        # token_list = []
+        token_list = [0]
+        device = torch.device("cuda" if enc_state.is_cuda else "cpu")
+        token = torch.tensor([token_list], dtype=torch.long).to(device)
+        dec_state = self.decoder(token)[:, -1, :]
+        for t in range(lengths):
+            logits = self.joint(enc_state[t].view(-1), dec_state.view(-1))
+            out = self.log_softmax(logits, dim=0).detach()
+            pred = torch.argmax(out, dim=0)
+            pred = int(pred.item())
+
+            if pred != 0:
+                token_list.append(pred)
+                token = torch.tensor([token_list], dtype=torch.long)
+
+                if enc_state.is_cuda:
+                    token = token.cuda()
+                dec_state = self.decoder(token)[:, -1, :]
+        # return token_list
+        return token_list[1:]
 
 
 class TransformerTranducerForRNNT(nn.Module):
-    def __init__(self, config: TransformerTransducerConfig):
+    def __init__(self, config):
         super().__init__()
         self.config = config
 
@@ -352,9 +427,9 @@ class TransformerTranducerForRNNT(nn.Module):
         label_len = torch.IntTensor([torch.masked_select(tensor, tensor != 0).shape[0] for tensor in labels])
         non_blank_labels = torch.stack([tensor[1:] for tensor in labels]).to(torch.int32)
         audio_len = torch.IntTensor(
-            [torch.masked_select(tensor[0], tensor[0] != 0.0).shape[0] for tensor in input_values]
+            [torch.masked_select(tensor[1], tensor[1] != 0.0).shape[0] for tensor in input_values],
         )
-
+        audio_len = audio_len.to(input_values.device)
         label_len = label_len.to(labels.device)
         audio_len = audio_len.to(input_values.device)
         non_blank_labels = non_blank_labels.to(labels.device)
@@ -362,14 +437,19 @@ class TransformerTranducerForRNNT(nn.Module):
         loss = rnnt_loss(
             logits=logits,
             targets=non_blank_labels,
-            logit_lengths=audio_len,
+            logit_lengths=torch.tensor(
+                [80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80], device=input_values.device, dtype=torch.int32
+            ),
             target_lengths=label_len,
             blank=self.blank_id,
             clamp=-1,
             reduction=self.reduction,
         )
 
-        test_1 = accelerator.pad_across_processes(logits, 1)
-        test_2 = accelerator.pad_across_processes(test_1, 2)
-
+        # test_1 = accelerator.pad_across_processes(logits, 1)
+        # test_2 = accelerator.pad_across_processes(test_1, 2)
+        torch.cuda.empty_cache()
         return TransducerOuput(loss=loss, logits=logits)
+
+    def generate(self) -> None:
+        return

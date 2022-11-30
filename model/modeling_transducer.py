@@ -6,7 +6,6 @@ from transformers.utils import ModelOutput
 from transformers.modeling_utils import PreTrainedModel
 import math
 from typing import Optional, Tuple
-import warnings
 from .config import TransformerTransducerConfig
 
 # from accelerate import Accelerator
@@ -359,41 +358,8 @@ class TransducerModel(TransducerPretrainedModel):
 
         return logits
 
-    def recognize(self, inputs, inputs_length=None, audio_mask=None):
 
-        batch_size = inputs.size(0)
-        enc_states = self.audio_encoder(inputs, audio_mask)
-
-        results = []
-        for batch in range(batch_size):
-            decoded_seq = self.decode(enc_states[batch], inputs_length[batch])
-            results.append(decoded_seq)
-        return results
-
-    def decode(self, enc_state, lengths):
-        # token_list = []
-        token_list = [0]
-        device = torch.device("cuda" if enc_state.is_cuda else "cpu")
-        token = torch.tensor([token_list], dtype=torch.long).to(device)
-        dec_state = self.decoder(token)[:, -1, :]
-        for t in range(lengths):
-            logits = self.joint(enc_state[t].view(-1), dec_state.view(-1))
-            out = self.log_softmax(logits, dim=0).detach()
-            pred = torch.argmax(out, dim=0)
-            pred = int(pred.item())
-
-            if pred != 0:
-                token_list.append(pred)
-                token = torch.tensor([token_list], dtype=torch.long)
-
-                if enc_state.is_cuda:
-                    token = token.cuda()
-                dec_state = self.decoder(token)[:, -1, :]
-        # return token_list
-        return token_list[1:]
-
-
-class TransformerTranducerForRNNT(nn.Module):
+class TransformerTranducerForRNNT(TransducerPretrainedModel):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -424,7 +390,8 @@ class TransformerTranducerForRNNT(nn.Module):
             labels,
         )
 
-        label_len = torch.IntTensor([torch.masked_select(tensor, tensor != 0).shape[0] for tensor in labels])
+        # [TODO]: 길이 구하는 기능들 클린 코드 할 것
+        label_len = (labels != 0).sum(dim=-1) - 1
         non_blank_labels = torch.stack([tensor[1:] for tensor in labels]).to(torch.int32)
         audio_len = torch.IntTensor(
             [torch.masked_select(tensor[1], tensor[1] != 0.0).shape[0] for tensor in input_values],
@@ -437,19 +404,18 @@ class TransformerTranducerForRNNT(nn.Module):
         loss = rnnt_loss(
             logits=logits,
             targets=non_blank_labels,
-            logit_lengths=torch.tensor(
-                [80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80], device=input_values.device, dtype=torch.int32
-            ),
-            target_lengths=label_len,
+            logit_lengths=torch.tensor([320, 320, 320, 320], device=input_values.device, dtype=torch.int32),
+            target_lengths=label_len.to(torch.int32),
             blank=self.blank_id,
             clamp=-1,
             reduction=self.reduction,
         )
 
-        # test_1 = accelerator.pad_across_processes(logits, 1)
-        # test_2 = accelerator.pad_across_processes(test_1, 2)
         torch.cuda.empty_cache()
         return TransducerOuput(loss=loss, logits=logits)
+
+    def get_lengths(self, audios, labels) -> None:
+        return
 
     def generate(self) -> None:
         return

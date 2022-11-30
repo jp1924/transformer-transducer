@@ -1,55 +1,18 @@
 from dataclasses import dataclass, field
-from transformers import TrainingArguments
+from transformers import Seq2SeqTrainingArguments
 
 
 @dataclass
-class TrainArguments:
-    cache: str = field(
-        default=None,
-        metadata={"help": "허브로 부터 데이터들을 불러올 때 저장할 공간의 경로를 지정합니다."},
+class TransducerTrainArgument(Seq2SeqTrainingArguments):
+    mel_max_length: int = field(
+        default=400,
+        metadata={"help": "mel의 최대 길이르 지정합니다. 이 Transducer는 무조건 일정한 크기의 데이터만 들어가야 합니다."},
     )
-    output_dir: str = field(
-        default=None,
-        metadata={"help": ""},
+    mel_stack: int = field(
+        default=4,
+        metadata={"help": "mel을 windowing 시킨 다음 그 값을 적재할 크기를 지정합니다."},
     )
-    train_batch_size: int = field(
-        default=None,
-        metadata={"help": ""},
-    )
-    valid_batch_size: int = field(
-        default=None,
-        metadata={"help": ""},
-    )
-    train_accumulate: int = field(
-        default=1,
-        metadata={"help": ""},
-    )
-    valid_accumulate: int = field(
-        default=1,
-        metadata={"help": ""},
-    )
-    local_rank: int = field(default=-1)
-    train_epochs: int = field(
-        default=None,
-        metadata={"help": ""},
-    )
-    train_max_step: int = field(
-        default=None,
-        metadata={"help": ""},
-    )
-    valid_step: int = field(
-        default=5000,
-        metadata={"help": ""},
-    )
-    warmup_step: int = field(
-        default=None,
-        metadata={"help": ""},
-    )
-    weight_decay: float = field(
-        default=None,
-        metadata={"help": ""},
-    )
-    learning_rate: float = field(
-        default=None,
-        metadata={"help": ""},
+    window_stride: int = field(
+        default=3,
+        metadata={"help": "windowing을 할 값을 지정합니다. mel_stack 값보다 적은 값이여 합니다. 그렇지 않으면 음성간의 연관성이 사라질 수 있습니다!"},
     )

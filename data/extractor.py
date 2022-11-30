@@ -175,7 +175,7 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         # features = [self.extract_features(waveform) for waveform in raw_speech]
         if stride and stack:
             assert stack > stride, "stride must be small stack_size, please set correct value"
-            features = [self.feature_compress(wavform, max_length) for wavform in raw_speech]
+            features = [self.feature_compress(wavform, max_length, stride, stack) for wavform in raw_speech]
 
         # convert into correct format for padding
         encoded_inputs = BatchFeature({"input_features": features})

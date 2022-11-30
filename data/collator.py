@@ -33,7 +33,13 @@ class TransducerCollator:
 
     max_length: int = 504
 
-    def __init__(self, tokenizer: PreTrainedTokenizer = None) -> None:
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizer = None,
+        max_length=None,
+        stack=None,
+        stride=None,
+    ) -> None:
         """DataLoader로 부터 건내받은 불규칙한 길이의 데이터를 일정한 길이오 만든 뒤 model에 건내주는 역할을 합니다.
 
         Transformer Transducer에서 처리하기 위해 Audio데이터를 처리합니다.
@@ -53,13 +59,16 @@ class TransducerCollator:
             tokenizer (PreTrainedTokenizer, optional): _description_. Defaults to None.
         """
         self.tokenizer = tokenizer
+        self.stack = stack
+        self.stride = stride
+        self.max_length = max_length
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         feature_select: str = lambda key: [feature[key] for feature in features]
         input_values: list = feature_select("input_values")
         labels: list = feature_select("labels")
 
-        labels = [{"input_values": np.insert(label, 0, 0)} for label in labels]
+        labels = [{"input_values": np.insert(label, 0, 2)[:512]} for label in labels]
 
         batch = self._audio_pad_2(input_values)
         labels = self.tokenizer.pad(
@@ -108,20 +117,28 @@ class TransducerCollator:
         return result
 
     def _audio_pad_2(self, input_values: List[torch.Tensor]) -> torch.Tensor:
-        max_length = 512
-        input_values = [value[:max_length, :] for value in input_values]
 
-        pad_result = list()
-        for audio in input_values:
-            time_seq, mel_seq = audio.shape
-            pad_zeros_mat = np.zeros([max_length - time_seq, mel_seq])
-            padded_inputs = np.row_stack([audio, pad_zeros_mat])
-            pad_result.append(padded_inputs)
+        value_list = list()
+        for mel_feature in input_values:
+            time_steps, features_dim = mel_feature.shape
+            mel_store = list()
+            for step in range(self.stack):
+                indices = [step + idx for idx in range(0, (time_steps - step), self.stride)]
+                features = mel_feature[indices[: self.max_length]]
 
-        pad_result = torch.tensor(pad_result)
+                # [TODO]: 이 부분은 extractor의 pad 기능이 하는게 맞지만 임시로 이렇게 만든다.
+                pad_width = ((0, self.max_length - features.shape[0]), (0, 0))
+                features = np.pad(features, pad_width)
+
+                mel_store.append(features)
+
+            padded_feature = np.concatenate(mel_store, axis=1)
+            value_list.append(torch.tensor(padded_feature))
+
+        print
 
         attention_result = list()
-        for audio in input_values:
+        for audio in value_list:
             time_seq, mel_seq = audio.shape
             mask = np.ones([mel_seq, mel_seq])
             up = np.triu(mask, k=2 + 1)
@@ -130,8 +147,10 @@ class TransducerCollator:
             attention_result.append(attention_mask)
         attention_result = torch.tensor(attention_result)
 
+        value_result = torch.stack(value_list)
+
         result = {
-            "input_values": pad_result.to(torch.float32),
+            "input_values": value_result.transpose(2, 1),
             "audio_attention_mask": attention_result.to(torch.float32),
         }
 

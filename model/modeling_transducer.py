@@ -407,6 +407,7 @@ class TransducerModel(TransducerPretrainedModel):
 
         return logits
 
+    @torch.no_grad()
     def inference_test_2(self, audio_input: torch.Tensor) -> None:
         token_list = [2]
         blank_token = torch.tensor([token_list], device=self.device)
@@ -424,15 +425,16 @@ class TransducerModel(TransducerPretrainedModel):
 
             pred = int(pred.item())
 
-            if pred != 0:
+            if pred != 2:
                 token_list.append(pred)
-                token = torch.tensor([token_list], dtype=torch.long)
+            token = torch.tensor([token_list], dtype=torch.long)
 
-                if audio_input.is_cuda:
-                    token = token.cuda()
-                dec_state = self.label_encoder(token)[:, -1, :]
+            if audio_input.is_cuda:
+                token = token.cuda()
+            dec_state = self.label_encoder(token)[:, -1, :]
         return token_list[1:]
 
+    @torch.no_grad()
     def inference_test_1(self, audio_input: torch.Tensor) -> None:
         self.blank = 2
 

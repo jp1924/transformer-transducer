@@ -230,14 +230,17 @@ class TransducerEncoderLayer(nn.Module):
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
     ) -> torch.Tensor:
-        attn_residual = hidden_states
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
+
+        attn_residual = hidden_states
         hidden_states = self.attention(
             hidden_states,
             attention_mask,
             head_mask=head_mask,
             output_attentions=output_attentions,
             past_key_value=self_attn_past_key_value,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
         )
         hidden_states = self.dropout(hidden_states[0])
         hidden_states = attn_residual + hidden_states
@@ -270,7 +273,7 @@ class LabelEncoder(nn.Module):
     def forward(
         self,
         label_data: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         position_ids = self.position_ids[: label_data.shape[1]]
         position_ids = position_ids.to(label_data.device)
@@ -301,7 +304,7 @@ class AudioEncoder(nn.Module):
     def forward(
         self,
         hidden_state: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         # audio_inputs = audio_inputs.transpose(1, 2)
         # hidden_state = self.linear(audio_inputs)
@@ -352,11 +355,11 @@ class JointNetwork(nn.Module):
             hidden_state = self.dense(hidden_state)
 
         else:
-            test_1 = audio_output[:, :, None, :]
-            test_2 = label_output[:, None, :, :]
+            # test_1 = audio_output[:, :, None, :]
+            # test_2 = label_output[:, None, :, :]
 
-            test_1 = self.audio_linear(test_1)
-            test_2 = self.label_linear(test_2)
+            test_1 = self.audio_linear(audio_output)
+            test_2 = self.label_linear(label_output)
 
             hidden_state = test_1 + test_2
 
@@ -393,6 +396,9 @@ class TransducerModel(TransducerPretrainedModel):
         label_attention_mask = self.create_extended_attention_mask_for_decoder(label_shape, label_attention_mask)
         audio_outputs = self.audio_encoder(audios, audio_attention_mask)
         label_outputs = self.label_encoder(labels, label_attention_mask)
+        audio_outputs = audio_outputs[:, :, None, :]
+        label_outputs = label_outputs[:, None, :, :]
+
         joint_outputs = self.joint_network(audio_outputs, label_outputs)
 
         hidden_state = self.tanh(joint_outputs)
@@ -401,20 +407,55 @@ class TransducerModel(TransducerPretrainedModel):
 
         return logits
 
-    def inference_test(self, audio_input: torch.Tensor, audio_attention_mask: torch.Tensor) -> None:
-        audio_shape = audio_input.size()
-        audio_attention_mask = self.get_extended_attention_mask(audio_attention_mask, audio_shape)
-        audio_hidden = self.audio_encoder(audio_input, audio_attention_mask)
+    def inference_test_2(self, audio_input: torch.Tensor) -> None:
+        token_list = [2]
+        blank_token = torch.tensor([token_list], device=self.device)
+        dec_state = self.label_encoder(blank_token)[:, -1, :]
+        lengths = audio_input.shape[0]
 
+        for t in range(lengths):
+            joint_outputs = self.joint_network(audio_input[t].view(-1), dec_state.view(-1))
+            hidden_state = self.tanh(joint_outputs)
+            hidden_state = self.dense(hidden_state)
+            logits = self.log_softmax(hidden_state)
+
+            pred = logits.argmax(dim=0)
+            print(pred)
+
+            pred = int(pred.item())
+
+            if pred != 0:
+                token_list.append(pred)
+                token = torch.tensor([token_list], dtype=torch.long)
+
+                if audio_input.is_cuda:
+                    token = token.cuda()
+                dec_state = self.label_encoder(token)[:, -1, :]
+        return token_list[1:]
+
+    def inference_test_1(self, audio_input: torch.Tensor) -> None:
         self.blank = 2
 
         dec_state = [None] * len(self.label_encoder.layers)
         hyp = Hypothesis(score=0.0, yseq=[self.blank], dec_state=dec_state)
         cache = {}
 
-        y, state, _ = self.score(hyp, cache, audio_hidden)
+        y, state, _ = self.score(hyp, cache)
+        for i, hi in enumerate(audio_input):  # batch size 만큼
+            joint_outputs = self.joint_network(hi, y[0])
+            hidden_state = self.tanh(joint_outputs)
+            hidden_state = self.dense(hidden_state)
+            logits = self.log_softmax(hidden_state)
+            logp, pred = torch.max(logits, dim=-1)
+            print(pred)
+            if pred != self.blank:
+                hyp.yseq.append(int(pred))
+                hyp.score += float(logp)
 
-        return
+                hyp.dec_state = state
+
+                y, state, _ = self.score(hyp, cache)
+        return [hyp]
 
     def check_state(self, state, max_len, pad_token):
         """Left pad or trim state according to max_len.
@@ -476,11 +517,16 @@ class TransducerModel(TransducerPretrainedModel):
             new_state = list()
             for s, layer in zip(state, self.label_encoder.layers):
                 if s is not None:
-                    label = label[:, -1:, :]
-                    label_mask = label_mask[:, -1:, :]
+                    non_blank_label = label[:, -1:, :]
+                    non_blank_label_mask = label_mask[:, -1:, :]
 
-                label = layer(label, label_mask)
-
+                    label = layer(
+                        non_blank_label,
+                        encoder_hidden_states=label,
+                        encoder_attention_mask=non_blank_label_mask,
+                    )
+                else:
+                    label = layer(label, label_mask)
                 if s is not None:
                     label = torch.cat([label, s], dim=1)
 

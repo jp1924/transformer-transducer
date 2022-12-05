@@ -8,7 +8,8 @@ from transformers.modeling_utils import PreTrainedModel
 import math
 from typing import Optional, Tuple
 from .config import TransformerTransducerConfig
-
+import torch.distributed as dist
+from transformers.trainer_utils import is_main_process
 from typing import List, Union, Any, Dict
 
 # head_mask는 multi-head attention에서 head의 사용 여부를 결정하는 mask다.
@@ -195,16 +196,16 @@ class TransducerFeedForward(nn.Module):
         else:
             self.act_fn = config.hidden_act
 
-        self.output_dense = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.output_dropout = nn.Dropout(config.hidden_dropout)
+        self.ffn_dense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.ffn_dropout = nn.Dropout(config.hidden_dropout)
 
     def forward(self, hidden_states):
         hidden_states = self.intermediate_dense(hidden_states)
         hidden_states = self.act_fn(hidden_states)
         hidden_states = self.intermediate_dropout(hidden_states)
 
-        hidden_states = self.output_dense(hidden_states)
-        hidden_states = self.output_dropout(hidden_states)
+        hidden_states = self.ffn_dense(hidden_states)
+        hidden_states = self.ffn_dropout(hidden_states)
 
         return hidden_states
 
@@ -232,7 +233,7 @@ class TransducerEncoderLayer(nn.Module):
     ) -> torch.Tensor:
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
 
-        attn_residual = hidden_states
+        attention_residual = hidden_states
         hidden_states = self.attention(
             hidden_states,
             attention_mask,
@@ -243,7 +244,7 @@ class TransducerEncoderLayer(nn.Module):
             encoder_attention_mask=encoder_attention_mask,
         )
         hidden_states = self.dropout(hidden_states[0])
-        hidden_states = attn_residual + hidden_states
+        hidden_states = attention_residual + hidden_states
         hidden_states = self.layer_norm(hidden_states)
         """
             [NOTE]: 이 부분은 한번 확인할 것
@@ -321,13 +322,13 @@ class JointNetwork(nn.Module):
         # [TODO]: 여기 중에서 하나를 선택하기!
         # [NOTE]: case_1
         concat_size = config.hidden_size * 2
-        self.dense = nn.Linear(concat_size, config.hidden_size)
+        self.dense = nn.Linear(concat_size, config.vocab_size)
 
-        self.audio_linear = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.label_linear = nn.Linear(config.hidden_size, config.intermediate_size)
+        # self.audio_linear = nn.Linear(config.hidden_size, config.intermediate_size)
+        # self.label_linear = nn.Linear(config.hidden_size, config.intermediate_size)
 
         # [TODO]: test와 실제 코드와 비교해 결과가 비슷한지 확인하기!
-        self.temp = False
+        self.temp = True
 
     def forward(
         self,
@@ -342,15 +343,6 @@ class JointNetwork(nn.Module):
         """
 
         if self.temp:
-            audio_len = audio_output.shape[1]
-            label_len = label_output.shape[1]
-
-            audio_output = audio_output.unsqueeze(2)
-            label_output = label_output.unsqueeze(1)
-            # [NOTE]: logits (Tensor) – Tensor of dimension (batch, max seq length, max target ""length + 1"", class) containing output from joiner
-            audio_output = audio_output.repeat(1, 1, label_len, 1)
-            label_output = label_output.repeat(1, audio_len, 1, 1)
-
             hidden_state = torch.cat([audio_output, label_output], dim=-1)
             hidden_state = self.dense(hidden_state)
 
@@ -359,6 +351,7 @@ class JointNetwork(nn.Module):
             # test_2 = label_output[:, None, :, :]
 
             test_1 = self.audio_linear(audio_output)
+
             test_2 = self.label_linear(label_output)
 
             hidden_state = test_1 + test_2
@@ -373,11 +366,11 @@ class TransducerModel(TransducerPretrainedModel):
         self.label_encoder = LabelEncoder(config)
         self.joint_network = JointNetwork(config)
 
-        self.tanh = nn.Tanh()
-        self.dense = nn.Linear(config.intermediate_size, config.vocab_size)
+        # self.tanh = nn.Tanh()
+        self.dense = nn.Linear(config.hidden_size, config.vocab_size)
         self.log_softmax = nn.LogSoftmax(dim=-1)
 
-        self.after_norm = nn.LayerNorm(config.hidden_size)
+        # self.after_norm = nn.LayerNorm(config.hidden_size)
 
     def forward(
         self,
@@ -396,14 +389,25 @@ class TransducerModel(TransducerPretrainedModel):
         label_attention_mask = self.create_extended_attention_mask_for_decoder(label_shape, label_attention_mask)
         audio_outputs = self.audio_encoder(audios, audio_attention_mask)
         label_outputs = self.label_encoder(labels, label_attention_mask)
-        audio_outputs = audio_outputs[:, :, None, :]
-        label_outputs = label_outputs[:, None, :, :]
+        if not self.training and is_main_process(dist.get_rank()):
+            print(self.inference_test_2(audio_outputs[0]))
+        # [NOTE]: temp True ===========================================
+        audio_len = audio_outputs.shape[1]
+        label_len = label_outputs.shape[1]
 
+        audio_outputs = audio_outputs.unsqueeze(2)
+        label_outputs = label_outputs.unsqueeze(1)
+        # [NOTE]: logits (Tensor) – Tensor of dimension (batch, max seq length, max target ""length + 1"", class) containing output from joiner
+        audio_outputs = audio_outputs.repeat(1, 1, label_len, 1)
+        label_outputs = label_outputs.repeat(1, audio_len, 1, 1)
+        # [NOTE]: temp False ===========================================
+        # audio_outputs = audio_outputs[:, :, None, :]
+        # label_outputs = label_outputs[:, None, :, :]
         joint_outputs = self.joint_network(audio_outputs, label_outputs)
 
-        hidden_state = self.tanh(joint_outputs)
-        hidden_state = self.dense(hidden_state)
-        logits = self.log_softmax(hidden_state)
+        # hidden_state = self.tanh(joint_outputs)
+        # hidden_state = self.dense(joint_outputs)
+        logits = self.log_softmax(joint_outputs)
 
         return logits
 
@@ -416,13 +420,11 @@ class TransducerModel(TransducerPretrainedModel):
 
         for t in range(lengths):
             joint_outputs = self.joint_network(audio_input[t].view(-1), dec_state.view(-1))
-            hidden_state = self.tanh(joint_outputs)
-            hidden_state = self.dense(hidden_state)
-            logits = self.log_softmax(hidden_state)
+            # hidden_state = self.tanh(joint_outputs)
+            # hidden_state = self.dense(joint_outputs)
+            logits = self.log_softmax(joint_outputs)
 
             pred = logits.argmax(dim=0)
-            print(pred)
-
             pred = int(pred.item())
 
             if pred != 2:
@@ -550,6 +552,8 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         self.reduction = config.loss_reduction
         self.blank_id = config.blank_id
 
+        self.post_init()
+
     def forward(
         self,
         input_values: Optional[torch.Tensor],
@@ -560,6 +564,10 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         return_dict: Optional[bool] = None,
         labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+
+        audio_attention_mask = audio_attention_mask == 0
+
+        batch_size, seq_size, _ = input_values.shape
 
         logits = self.transducer(
             input_values,
@@ -573,6 +581,9 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
 
         # [TODO]: 길이 구하는 기능들 클린 코드 할 것
         label_len = (labels != 0).sum(dim=-1) - 1
+        input_length = torch.tensor(
+            [seq_size for _ in range(batch_size)], device=input_values.device, dtype=torch.int32
+        )
         non_blank_labels = torch.stack([tensor[1:] for tensor in labels]).to(torch.int32)
         audio_len = torch.IntTensor(
             [torch.masked_select(tensor[1], tensor[1] != 0.0).shape[0] for tensor in input_values],
@@ -585,7 +596,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         loss = rnnt_loss(
             logits=logits,
             targets=non_blank_labels,
-            logit_lengths=torch.tensor([320, 320, 320, 320], device=input_values.device, dtype=torch.int32),
+            logit_lengths=input_length,
             target_lengths=label_len.to(torch.int32),
             blank=self.blank_id,
             clamp=-1,

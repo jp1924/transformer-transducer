@@ -263,13 +263,29 @@ class TransducerEncoderLayer(nn.Module):
 
 class LabelEncoder(nn.Module):
     def __init__(self, config: TransformerTransducerConfig) -> None:
-        super().__init__()
+        super(LabelEncoder, self).__init__()
+        self.test = config.model_test
+        if self.test:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=config.hidden_size,
+                nhead=config.num_attention_heads,
+                dim_feedforward=config.intermediate_size,
+                dropout=config.activation_dropout,
+                layer_norm_eps=config.layer_norm_eps,
+                batch_first=True,
+                norm_first=False,
+                device=None,
+                dtype=None,
+            )
+            self.encoder = nn.TransformerEncoder(encoder_layer, config.label_layers)
+            self.head_size = config.num_attention_heads
+        else:
+            encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.label_layers)]
+            self.layers = nn.ModuleList(encoder_layers)
+
         self.position_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
         self.word_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
         self.position_ids = torch.arange(config.position_embed_size)
-
-        encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.label_layers)]
-        self.layers = nn.ModuleList(encoder_layers)
 
     def forward(
         self,
@@ -283,8 +299,15 @@ class LabelEncoder(nn.Module):
 
         hidden_state = word_embed + position_embed
 
-        for layer in self.layers:
-            hidden_state = layer(hidden_state, attention_mask)
+        if self.test:
+            seq_size = attention_mask.shape[1]
+            attention_mask = attention_mask[:, None, :]
+            attention_mask = attention_mask.repeat(self.head_size, seq_size, 1)
+            attention_mask = ~attention_mask.bool()
+            hidden_state = self.encoder(hidden_state, attention_mask)
+        else:
+            for layer in self.layers:
+                hidden_state = layer(hidden_state, attention_mask)
 
         return hidden_state
 
@@ -293,14 +316,29 @@ class AudioEncoder(nn.Module):
     def __init__(self, config: TransformerTransducerConfig) -> None:
         super(AudioEncoder, self).__init__()
         # self.position_embedding = PositionalEncoding(config.hidden_size)
+        self.test = config.model_test
+        if self.test:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=config.hidden_size,
+                nhead=config.num_attention_heads,
+                dim_feedforward=config.intermediate_size,
+                dropout=config.activation_dropout,
+                layer_norm_eps=config.layer_norm_eps,
+                batch_first=True,
+                norm_first=False,
+                device=None,
+                dtype=None,
+            )
+            self.encoder = nn.TransformerEncoder(encoder_layer, config.audio_layers)
+            self.head_size = config.num_attention_heads
+        else:
+            self.test_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
+            self.test_ids = torch.arange(config.position_embed_size)
 
-        self.test_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
-        self.test_ids = torch.arange(config.position_embed_size)
+            self.linear = nn.Linear(80, config.hidden_size)
 
-        self.linear = nn.Linear(80, config.hidden_size)
-
-        encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.audio_layers)]
-        self.layers = nn.ModuleList(encoder_layers)
+            encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.audio_layers)]
+            self.layers = nn.ModuleList(encoder_layers)
 
     def forward(
         self,
@@ -309,9 +347,12 @@ class AudioEncoder(nn.Module):
     ) -> torch.Tensor:
         # audio_inputs = audio_inputs.transpose(1, 2)
         # hidden_state = self.linear(audio_inputs)
-
-        for layer in self.layers:
-            hidden_state = layer(hidden_state, attention_mask)
+        if self.test:
+            multi_attention_mask = attention_mask.repeat(self.head_size, 1, 1)
+            hidden_state = self.encoder(hidden_state, multi_attention_mask)
+        else:
+            for layer in self.layers:
+                hidden_state = layer(hidden_state, attention_mask)
 
         return hidden_state
 
@@ -382,11 +423,11 @@ class TransducerModel(TransducerPretrainedModel):
         return_dict: Optional[bool] = None,
         labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        audio_shape = audios.size()
-        audio_attention_mask = self.get_extended_attention_mask(audio_attention_mask, audio_shape)
+        # audio_shape = audios.size()
+        # audio_attention_mask = self.get_extended_attention_mask(audio_attention_mask, audio_shape)
 
-        label_shape = labels.size()
-        label_attention_mask = self.create_extended_attention_mask_for_decoder(label_shape, label_attention_mask)
+        # label_shape = labels.size()
+        # label_attention_mask = self.create_extended_attention_mask_for_decoder(label_shape, label_attention_mask)
         audio_outputs = self.audio_encoder(audios, audio_attention_mask)
         label_outputs = self.label_encoder(labels, label_attention_mask)
         if not self.training and is_main_process(dist.get_rank()):

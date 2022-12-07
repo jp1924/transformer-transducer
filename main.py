@@ -15,6 +15,42 @@ from transformers.trainer_utils import EvalPrediction, is_main_process
 from utils import DataArguments, ModelArguments, TransducerTrainArgument
 
 
+def concat_frame(features, left_context_width, right_context_width):
+    bsz = len(features)
+
+    stack = []
+    for b in range(bsz):
+        time_steps, features_dim = features[b].shape
+        concated_features = np.zeros(
+            shape=[time_steps, features_dim * (1 + left_context_width + right_context_width)], dtype=features[b].dtype
+        )
+        # middle part is just the uttarnce
+        concated_features[:, left_context_width * features_dim : (left_context_width + 1) * features_dim] = features[b]
+
+        for i in range(left_context_width):
+            # add left context
+            concated_features[
+                i + 1 : time_steps,
+                (left_context_width - i - 1) * features_dim : (left_context_width - i) * features_dim,
+            ] = features[b][0 : time_steps - i - 1, :]
+
+        for i in range(right_context_width):
+            # add right context
+            concated_features[
+                0 : time_steps - i - 1,
+                (right_context_width + i + 1) * features_dim : (right_context_width + i + 2) * features_dim,
+            ] = features[b][i + 1 : time_steps, :]
+
+        concated_features = np.delete(concated_features, range(left_context_width), axis=0)
+        concated_features = np.delete(
+            concated_features,
+            [(x + concated_features.shape[0] - right_context_width) for x in range(right_context_width)],
+            axis=0,
+        )
+        stack.append(concated_features)
+    return stack
+
+
 def main(parser: HfArgumentParser) -> None:
     train_args, data_args, model_args, _ = parser.parse_args_into_dataclasses(return_remaining_strings=True)
     setproctitle(train_args.run_name)
@@ -91,8 +127,9 @@ def main(parser: HfArgumentParser) -> None:
 
     tokenizer = Wav2Vec2Tokenizer.from_pretrained("test42/kerberus2", use_auth_token=True)
     config = TransformerTransducerConfig(tokenizer.vocab_size)
-    extractor = TransducerFeatureExtractor(0, 16000, 0)
     model = TransformerTranducerForRNNT(config)
+
+    extractor = TransducerFeatureExtractor(100, 16000, 0.0, 4, 3)
 
     # [NOTE]: temp
     train_data = get_concat_dataset([data_args.data_name], "train") if train_args.do_train else None
@@ -102,6 +139,9 @@ def main(parser: HfArgumentParser) -> None:
     train_data = train_data.rename_column("input_ids", "labels") if train_args.do_train else None
     valid_data = valid_data.rename_column("input_ids", "labels") if train_args.do_eval else None
 
+    train_data = train_data.rename_column("input_values", "input_features") if train_args.do_train else None
+    valid_data = valid_data.rename_column("input_values", "input_features") if train_args.do_eval else None
+
     wer = load("evaluate-metric/wer")
 
     collator = TransducerCollator(
@@ -109,6 +149,7 @@ def main(parser: HfArgumentParser) -> None:
         train_args.mel_max_length,
         train_args.mel_stack,
         train_args.window_stride,
+        extractor=extractor,
     )
     callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
 
@@ -190,47 +231,3 @@ if "__main__" in __name__:
     parser = HfArgumentParser([TransducerTrainArgument, DataArguments, ModelArguments])
     # https://code.visualstudio.com/docs/python/debugging#_redirectoutput
     main(parser)
-    # # [NOTE]: ---------------------------------------------
-
-    """
-        test_values = train_data[25]["input_values"]
-        time_steps, features_dim = test_values.shape
-
-        stack = 4
-        stride = 3
-
-        max_length = 400
-
-        mel_store = list()
-        time_steps, features_dim = test_values.shape
-        for step in range(stack):
-            indices = [step + idx for idx in range(0, (time_steps - step), stride)]
-            features = test_values[indices[:max_length]]
-            # [TODO]: 이 부분은 extractor의 pad 기능이 하는게 맞지만 임시로 이렇게 만든다.
-            pad_width = ((0, max_length - features.shape[0]), (0, 0))
-            features = np.pad(features, pad_width)
-            mel_store.append(features)
-        np.concatenate(mel_store)
-
-        zero_feature_dim = features_dim * (1 + 3 + 0)
-        concated_features = np.zeros(shape=[time_steps, zero_feature_dim], dtype=np.float32)
-        concated_features[:, 3 * features_dim : (3 + 1) * features_dim] = test_values
-        left_context_width = 4
-
-        for i in range(left_context_width):
-            # add left context
-            concated_features[
-                (i + 1) : time_steps,
-                ((left_context_width - i - 1) * features_dim) : ((left_context_width - i) * features_dim),
-            ] = test_values[0 : time_steps - i - 1, :]
-
-        interval = 3
-        temp_mat = [concated_features[i] for i in range(1, concated_features.shape[0], interval)]
-        subsampled_features = np.row_stack(temp_mat)
-
-        plt.imsave("/home/jsb193/subsampled_features.png", subsampled_features[:400])    
-    
-    """
-
-    # # [NOTE]: ---------------------------------------------
-    # plt.imsave("/home/jsb193/check_mel/test_asdasdasd1.png", padded_inputs)

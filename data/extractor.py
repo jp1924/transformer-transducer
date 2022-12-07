@@ -1,5 +1,5 @@
 import math
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 
 import numpy as np
 import torch
@@ -29,9 +29,18 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         feature_size: int,
         sampling_rate: int,
         padding_value: float,
+        stack: int = None,
+        stride: int = None,
         **kwargs,
     ) -> None:
         super().__init__(feature_size, sampling_rate, padding_value, **kwargs)
+
+        # [NOTE]: 굳이 stride, stack를 init에 추가한 이유,
+        #         init에 있는 값들은 한번 지정하면 이후에 변경하는 일이 없다. stride나 stack도 한번 설정하면 변경할 일이 없기 때문에 init에 놔뒀다.
+        if stride and stack:
+            assert stack > stride, "stride must be small stack_size, please set correct value"
+            self.stack = stack
+            self.stride = stride
 
     @staticmethod
     def piecewise_linear_log(features: torch.FloatTensor):
@@ -52,23 +61,33 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
 
         return features
 
-    def feature_compress(
-        self,
-        mel_feature: np.ndarray,
-        max_length: int,
-        stride: int,
-        stack: int,
-    ) -> np.ndarray:
+    # def mask_chunking(self, attention_mask)
 
-        time_steps, features_dim = mel_feature.shape
+    def compress_features(self, features: Union[List[np.ndarray], List["mel"], np.ndarray]) -> List[Any]:
+        if not isinstance(features, list):
+            features = [features]
+
+        return_list = list()
+        for mel in features:
+            compressed_feature = self._compress_features(mel)
+            return_list.append(compressed_feature)
+
+        return return_list
+
+    def _compress_features(self, mel_feature: np.ndarray) -> np.ndarray:
+        """mel을 windowing을 적용시켜 값을 압축시킨다."""
+        # [NOTE]: 여기서 각각의 멜을 windowing + padding한 뒤 나머지 compress_mel을 padding하는 방식으로 진행해야 할 듯 하다.
+        #         compress_features에서 padding을 처리하지 않고 하기에는 self._pad를 overriding해서 새로 만들어야 함.
+        time_steps, _ = mel_feature.shape
+        expected_len = math.ceil(time_steps / self.stride)
+
         mel_store = list()
-
-        for step in range(stack):
-            indices = [step + idx for idx in range(0, (time_steps - step), stride)]
-            features = mel_feature[indices[:max_length]]
-            # [TODO]: 이 부분은 extractor의 pad 기능이 하는게 맞지만 임시로 이렇게 만든다.
-            pad_width = ((0, max_length - features.shape[0]), (0, 0))
-            features = np.pad(features, pad_width, padder=self.padding_value)
+        # [TODO]: left, right context하고 data전처리 간의 어떤 연관이 있는지 모르겠다.
+        for step in range(self.stack):
+            indices = [step + idx for idx in range(0, (time_steps - step), self.stride)]
+            features = mel_feature[indices]
+            pad_width = ((0, expected_len - features.shape[0]), (0, 0))
+            features = np.pad(features, pad_width)
 
             mel_store.append(features)
 
@@ -80,9 +99,8 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         raw_speech: Union[np.ndarray, List[float], List[np.ndarray], List[List[float]]],
         padding: Union[bool, str, PaddingStrategy] = False,
         max_length: Optional[int] = None,
-        stride: Optional[int] = None,
-        stack: Optional[int] = None,
         truncation: bool = False,
+        windowing: bool = False,
         pad_to_multiple_of: Optional[int] = None,
         return_attention_mask: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
@@ -140,6 +158,24 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
             padding_value (`float`, defaults to 0.0):
                 The value that is used to fill the padding values / vectors.
         """
+        """
+        wav2vec2는 단순 audio만 받으면 됐지만 transformer-transducer와 같은 streamming모델들은 extractor를 다르게 만들어야 한다.
+        raw_audio, mel_spectrogram이 두게가 들어오는걸 상정하고 만들어야 한다.
+        extractor
+
+
+        np.ndarray: mini_batch 사이즈 만큼 들어올 때
+        size(batch, audio_dim) or size(batch, mel_features, time_seq)
+        
+        List[float]: 그냥 raw_audio만 들어올때
+        size(audio_dim)
+        
+        List[np.ndarray]: raw_audio가 batch_size만큼 들어올 때 ndarray.ver
+        size(batch, audio_dim.ndarray_ver) or size(batch, mel_features.ndarray_ver, time_seq.ndarray_ver)
+
+        List[List[float]: raw_audio가 batch_size만큼 들어올 때 list.ver
+        size(batch, audio_dim.list_ver) or size(mel_features.list_ver, time_seq.list_ver)
+        """
 
         if sampling_rate is not None:
             if sampling_rate != self.sampling_rate:
@@ -154,32 +190,33 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
                 "Failing to do so can result in silent errors that might be hard to debug."
             )
 
-        is_batched = bool(
-            isinstance(raw_speech, (list, tuple))
-            and (isinstance(raw_speech[0], np.ndarray) or isinstance(raw_speech[0], (tuple, list)))
-        )
+        is_sequential = isinstance(raw_speech, (list, tuple))
+        inner_type = isinstance(raw_speech[0], np.ndarray) or isinstance(raw_speech[0], (tuple, list))
+        is_batched: bool = is_sequential and inner_type
+        # list인데 내부에 ndarray나 list가 들어가 있는 경우를 찾는 듯
+        # batched는 아마 list형식의 내부에 ndarray, list같은 값이 들어가 있는 경우를 뜻하는듯 함.
 
-        if is_batched:
+        if is_batched:  # List[np.ndarray], List[List[float]]인 경우
             raw_speech = [np.asarray(speech, dtype=np.float32) for speech in raw_speech]
-        elif not is_batched and not isinstance(raw_speech, np.ndarray):
+        elif not is_batched and not isinstance(raw_speech, np.ndarray):  # List[float]인 경우
             raw_speech = np.asarray(raw_speech, dtype=np.float32)
-        elif isinstance(raw_speech, np.ndarray) and raw_speech.dtype is np.dtype(np.float64):
+        elif isinstance(raw_speech, np.ndarray) and raw_speech.dtype is np.dtype(np.float64):  # np.ndarray인 경우
             raw_speech = raw_speech.astype(np.float32)
 
         # always return batch
-        if not is_batched:
+        if not is_batched and raw_speech.ndim != 3:
             raw_speech = [raw_speech]
+        # 여기 이후부터는 list 형식임.
 
-        # extract spectrogram features
+        # extractor의 call은 값의 추출과 추출한 값들을 padding시키는 매소드다.
+        # raw_speech.ndim != 3를 한 이유는 mel이 들어오더라도 2차원 값이 아닌 무조건 3차원 값이여야 하기 때문에 저런식으로 코드를 작성했다.
 
-        # features = [self.extract_features(waveform) for waveform in raw_speech]
-        if stride and stack:
-            assert stack > stride, "stride must be small stack_size, please set correct value"
-            features = [self.feature_compress(wavform, max_length, stride, stack) for wavform in raw_speech]
+        features = [self.extract_features(waveform) for waveform in raw_speech]  # [bsz, raw_aduio]
+        features = [self.compress_features(mel) for mel in features]  # [bsz, mel, raw_aduio]
 
         # convert into correct format for padding
         encoded_inputs = BatchFeature({"input_features": features})
-
+        # [TODO]: max_length를 여기서 지정해서 알아서 잘라내도록 할 수 있지 않을까?
         padded_inputs = self.pad(
             encoded_inputs,
             padding=padding,

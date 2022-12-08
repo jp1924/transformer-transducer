@@ -512,7 +512,8 @@ class TransducerModel(TransducerPretrainedModel):
 
                 if audio_input.is_cuda:
                     token = token.cuda()
-                dec_state = self.label_encoder(token)[:, -1, :]
+                dec_state = self.label_encoder(token)
+                dec_state = dec_state.last_hidden_state[:, -1, :]
         return token_list[1:]
 
 

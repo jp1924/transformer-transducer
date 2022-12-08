@@ -1,4 +1,7 @@
-class TransformerTransducerConfig:
+from transformers import PretrainedConfig
+
+
+class TransformerTransducerConfig(PretrainedConfig):
     def __init__(self, vocab_size) -> None:
         self.label_layers = 2
         self.audio_layers = 18

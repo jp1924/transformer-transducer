@@ -422,10 +422,6 @@ class JointNetwork(nn.Module):
                 Linear(LabelEncoder(Labels(z_1:(i-1))))
         와 같이 적혀져 있기 때문에 Linear로 합치는 부분 까지를 joint network로 지정한다.
         """
-
-        audio_vector = audio_vector[:, :, None, :]
-        label_vector = label_vector[:, None, :, :]
-
         # audio_output = self.audio_linear(audio_output)
         # label_output = self.label_linear(label_output)
 
@@ -469,6 +465,7 @@ class TransducerModel(TransducerPretrainedModel):
             return_dict,
         )
         audio_hiddens = audio_outputs.last_hidden_state
+        audio_hiddens = audio_hiddens[:, :, None, :]
 
         label_outputs = self.label_encoder(
             labels,
@@ -478,11 +475,12 @@ class TransducerModel(TransducerPretrainedModel):
             return_dict,
         )
         label_hiddens = label_outputs.last_hidden_state
+        label_hiddens = label_hiddens[:, None, :, :]
 
         joint_outputs = self.joint_network(audio_hiddens, label_hiddens, return_dict)
         hidden_states = joint_outputs.hidden_state
         if not self.training and is_main_process(dist.get_rank()):
-            print(self.inference_test_2(audio_outputs[0]))
+            print(self.inference_test_2(audio_outputs.last_hidden_state[0]))
 
         if not return_dict:
             return (hidden_states, audio_hiddens, label_hiddens) + audio_outputs[1:] + label_outputs[1:]
@@ -496,19 +494,19 @@ class TransducerModel(TransducerPretrainedModel):
     def inference_test_2(self, audio_input: torch.Tensor) -> None:
         token_list = [self.config.blank_id]
         blank_token = torch.tensor([token_list], device=self.device)
-        dec_state = self.label_encoder(blank_token)[:, -1, :]
+        dec_state = self.label_encoder(blank_token)
+        dec_state = dec_state.last_hidden_state[:, -1, :]
         lengths = audio_input.shape[0]
 
         for t in range(lengths):
             joint_outputs = self.joint_network(audio_input[t].view(-1), dec_state.view(-1))
-            # hidden_state = self.tanh(joint_outputs)
-            # hidden_state = self.dense(joint_outputs)
-            logits = self.log_softmax(joint_outputs)
+            hidden_state = joint_outputs.hidden_state
+            logits = hidden_state.log_softmax(dim=-1)
 
             pred = logits.argmax(dim=0)
             pred = int(pred.item())
 
-            if pred != 2:
+            if pred != self.config.blank_id:
                 token_list.append(pred)
                 token = torch.tensor([token_list], dtype=torch.long)
 

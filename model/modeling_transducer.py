@@ -321,7 +321,7 @@ class LabelEncoder(nn.Module):
         label_data: Optional[torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
-        output_hidden_state: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
     ) -> torch.Tensor:
         position_ids = self.position_ids[: label_data.shape[1]]
@@ -383,7 +383,7 @@ class AudioEncoder(nn.Module):
         audio_data: Optional[torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
-        output_hidden_state: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
     ) -> torch.Tensor:
         if self.test:
@@ -393,10 +393,10 @@ class AudioEncoder(nn.Module):
             hidden_state = audio_data + position_vector
 
             if attention_mask is not None:
+                attention_mask = attention_mask.squeeze(1)
                 attention_mask = attention_mask.repeat(self.head_size, 1, 1)
-                attention_mask = attention_mask != 0
 
-            hidden_state = self.encoder(hidden_state, attention_mask)
+            hidden_state = self.encoder(hidden_state, ~attention_mask.bool())
         else:
             for layer in self.layers:
                 hidden_state = layer(hidden_state, attention_mask)
@@ -416,8 +416,8 @@ class JointNetwork(nn.Module):
 
     def forward(
         self,
-        audio_vector: torch.Tensor,
-        label_vector: torch.Tensor,
+        audio_hiddens: torch.Tensor,
+        label_hiddens: torch.Tensor,
         return_dict: Optional[bool] = True,
     ) -> torch.Tensor:
         """
@@ -426,18 +426,18 @@ class JointNetwork(nn.Module):
                 Linear(LabelEncoder(Labels(z_1:(i-1))))
         와 같이 적혀져 있기 때문에 Linear로 합치는 부분 까지를 joint network로 지정한다.
         """
-        if audio_vector.dim() == 3 and label_vector.dim() == 3:
-            audio_vector = audio_vector[:, :, None, :]
-            label_vector = label_vector[:, None, :, :]
+        if audio_hiddens.dim() == 3 and label_hiddens.dim() == 3:
+            audio_hiddens = audio_hiddens[:, :, None, :]
+            label_hiddens = label_hiddens[:, None, :, :]
             # [NOTE]: 굳이 여길 [:, None, :, :]와 같이 한 이유
             #         더 직관적이기 때문에, joint_nec은 값을 4차원으로 확장시킨 다음에 그 값을 합치는 역할을 수행한다.
             #         그렇기 깨문에 계산에 수행되는 값은 4차원 이라는 것을 간접적으로 알려주기 위해서 위와 같은 방법을 사용했다.
             #         물론 .unsqueeze와 같은 방법이 있지만 그러면 차이 어느정도 인지 확인할 수 없기에 이 방법은 제외했다.
 
-        audio_vector = self.audio_linear(audio_vector)
-        label_vector = self.label_linear(label_vector)
+        audio_hiddens = self.audio_linear(audio_hiddens)
+        label_hiddens = self.label_linear(label_hiddens)
 
-        concat_vector = audio_vector + label_vector
+        concat_vector = audio_hiddens + label_hiddens
         concat_vector = self.tanh(concat_vector)
         concat_vector = self.dense(concat_vector)
         if not return_dict:
@@ -452,7 +452,10 @@ class TransducerModel(TransducerPretrainedModel):
         self.label_encoder = LabelEncoder(config)
         self.joint_network = JointNetwork(config)
         self.config = config
-        self.mask_type = "chunk-wise"
+        self.mask_type = "diagonal"
+        self.chunk_size = 3
+        self.left = 10
+        self.right = 3
 
     def forward(
         self,
@@ -461,20 +464,24 @@ class TransducerModel(TransducerPretrainedModel):
         audio_attention_mask: Optional[torch.Tensor] = None,
         label_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
-        output_hidden_state: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
     ) -> torch.Tensor:
-        # audio_shape = audios.size()
-        # audio_attention_mask = self.get_extended_attention_mask(audio_attention_mask, audio_shape)
+        audio_shape = audios.size()
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if audio_attention_mask.dim() == 2 and "chunk" in self.mask_type:
-            pass
-
-        if audio_attention_mask.dim() == 2 and "diagonal" in self.mask_type:
-            pass
-
-        if audio_attention_mask.dim() == 2 and "full" in self.mask_type:
-            pass
+            audio_attention_mask = self.create_chunk_attention_mask(audio_attention_mask, audio_shape)
+        elif audio_attention_mask.dim() == 2 and "full" in self.mask_type:
+            audio_attention_mask = self.get_extended_attention_mask(audio_attention_mask, audio_shape)
+        elif audio_attention_mask.dim() == 2 and "diagonal" in self.mask_type:
+            audio_attention_mask = self.create_diag_attention_mask(audio_attention_mask, audio_shape)
+        else:
+            raise ValueError("값을 확인하는게 불가능!!!!")
 
         label_shape = labels.size()
         label_attention_mask = self.create_extended_attention_mask_for_decoder(label_shape, label_attention_mask)
@@ -483,7 +490,7 @@ class TransducerModel(TransducerPretrainedModel):
             audios,
             audio_attention_mask,
             output_attentions,
-            output_hidden_state,
+            output_hidden_states,
             return_dict,
         )
         audio_hiddens = audio_outputs.last_hidden_state
@@ -492,7 +499,7 @@ class TransducerModel(TransducerPretrainedModel):
             labels,
             label_attention_mask,
             output_attentions,
-            output_hidden_state,
+            output_hidden_states,
             return_dict,
         )
         label_hiddens = label_outputs.last_hidden_state
@@ -500,72 +507,76 @@ class TransducerModel(TransducerPretrainedModel):
         joint_outputs = self.joint_network(audio_hiddens, label_hiddens, return_dict)
         hidden_states = joint_outputs.hidden_state
 
-        if not self.training and is_main_process(dist.get_rank()):
-            print(self.inference_test_2(audio_outputs.last_hidden_state[0]))
-
         if not return_dict:
             return (hidden_states, audio_hiddens, label_hiddens) + audio_outputs[1:] + label_outputs[1:]
 
-        # [BUG]: audio_hiddens를 출력할 때 차원이 [:, :, None, :]된 상태의 hidden_state값이 출려된다. 수정할 것!
-        #        수정을 해야 하는 이유는 저 audio_hiddens의 값을 valid시 사용할 것이기 때문에
+        return TransducerBaseModelOutput(
+            logits=hidden_states,
+            audio_last_hidden_state=audio_hiddens,
+            label_last_hidden_state=label_hiddens,
+            audio_attentions=None,
+            label_attentions=None,
+        )
 
-        return TransducerBaseModelOutput(logits=hidden_states, audio_last_hidden_state=audio_hiddens)
-
-    def create_chunk_attetion_mask(
+    def create_chunk_attention_mask(
         self,
         attention_mask: torch.Tensor,
         input_shape: Tuple[int],
-        device: torch.device = None,
-        dtype: torch.float = None,
+        dtype: torch.float = torch.float,
     ) -> torch.Tensor:
+        if dtype is None:
+            dtype = self.dtype
 
-        mask_size = attention_mask.shape[1]
-        base_map = torch.diag(attention_mask)
-        chunk_size = 3
-        chunk_mask = torch.ones([(chunk_size * 2), chunk_size])
-        mask_x_dim = chunk_mask.shape[1]
-        mask_y_dim = chunk_mask.shape[0]
+        # [NOTE]: batch_size, mel_seq값은 사용하지 않지만 굳이 만든 이유는 input되는 audio_features의 차원 값을 알려줄 수 있기 때문에 명시함
+        batch_size, time_seq, mel_seq = input_shape
+        chunk_mask = attention_mask[0].diag()
+        mask = torch.ones([(self.chunk_size * 2), self.chunk_size])
 
-        for mask_idx in range(0, mask_size, chunk_size):
+        mask_x_dim = mask.shape[1]
+        mask_y_dim = mask.shape[0]
+
+        for mask_idx in range(0, time_seq, self.chunk_size):
             mask_x_pos = mask_idx + mask_x_dim
             mask_y_pos = mask_idx + mask_y_dim
 
-            if mask_y_pos > mask_size:  # for y, 이 부분은 chunk_mask가 끝 부분과 맞지 않을 때 일부러 짤라내는 부분이다.
-                truncate_size = mask_y_dim - (mask_y_pos - mask_size)
-                chunk_mask = chunk_mask[:truncate_size, :]
+            if mask_y_pos > time_seq:  # for y, 이 부분은 mask가 끝 부분과 맞지 않을 때 일부러 짤라내는 부분이다.
+                truncate_size = mask_y_dim - (mask_y_pos - time_seq)
+                mask = mask[:truncate_size, :]
 
-            if mask_x_pos > mask_size:  # for x
-                truncate_size = mask_x_dim - (mask_x_pos - mask_size)
-                chunk_mask = chunk_mask[:, :truncate_size]
+            if mask_x_pos > time_seq:  # for x
+                truncate_size = mask_x_dim - (mask_x_pos - time_seq)
+                mask = mask[:, :truncate_size]
 
-            base_map[mask_idx:mask_y_pos, mask_idx:mask_x_pos] = chunk_mask
-        return
+            chunk_mask[mask_idx:mask_y_pos, mask_idx:mask_x_pos] = mask
 
-    @torch.no_grad()
-    def inference_test_2(self, audio_input: torch.Tensor) -> None:
-        token_list = [self.config.blank_id]
-        blank_token = torch.tensor([token_list], device=self.device)
-        dec_state = self.label_encoder(blank_token)
-        dec_state = dec_state.last_hidden_state[:, -1, :]
-        lengths = audio_input.shape[0]
+        chunk_attention_mask = torch.stack([chunk_mask for _ in range(batch_size)])
+        chunk_attention_mask = chunk_attention_mask.to(dtype)
+        chunk_attention_mask = chunk_attention_mask[:, None, :, :]
 
-        for t in range(lengths):
-            joint_outputs = self.joint_network(audio_input[t].view(-1), dec_state.view(-1))
-            hidden_state = joint_outputs.hidden_state
-            logits = hidden_state.log_softmax(dim=-1)
+        return chunk_attention_mask
 
-            pred = logits.argmax(dim=0)
-            pred = int(pred.item())
+    def create_diag_attention_mask(
+        self,
+        attention_mask: torch.Tensor,
+        input_shape: Tuple[int],
+        dtype: torch.float = None,
+    ) -> torch.Tensor:
+        if dtype is None:
+            dtype = self.dtype
+        batch_size, time_seq, mel_seq = input_shape
+        diag_mask = attention_mask[0].new_ones(time_seq, time_seq)
 
-            if pred != self.config.blank_id:
-                token_list.append(pred)
-                token = torch.tensor([token_list], dtype=torch.long)
+        right_mask = diag_mask.triu(self.right)
+        left_mask = diag_mask.tril(-self.left)
 
-                if audio_input.is_cuda:
-                    token = token.cuda()
-                dec_state = self.label_encoder(token)
-                dec_state = dec_state.last_hidden_state[:, -1, :]
-        return token_list[1:]
+        diag_mask = left_mask + right_mask
+
+        diag_attention_mask = torch.stack([diag_mask for _ in range(batch_size)])
+        diag_attention_mask = diag_attention_mask.to(dtype)
+        diag_attention_mask = diag_attention_mask[:, None, :, :]
+
+        # [TODO]: 나중에 huggingface encoder 사용할 때 제거할 것!!!
+        return diag_attention_mask == 0
 
 
 class TransformerTranducerForRNNT(TransducerPretrainedModel):
@@ -587,7 +598,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         audio_attention_mask: Optional[torch.Tensor] = None,
         label_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
-        output_hidden_state: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
         labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -596,24 +607,13 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         input_length = audio_attention_mask.sum(-1, dtype=torch.int32)
         label_len = (labels != 0).sum(dim=-1) - 1
 
-        attention_result = list()
-        for audio in audio_attention_mask:
-            time_seq = audio.shape[0]
-            mask = np.ones([time_seq, time_seq])
-            up = np.triu(mask, k=2 + 1)
-            down = np.tril(mask, k=-10 - 1)
-            attention_mask = up + down
-            attention_result.append(attention_mask)
-
-        audio_attention_mask = torch.tensor(attention_result, device=self.device)
-
         transducer_outputs = self.transducer(
             input_features,
             labels,
             audio_attention_mask,
             label_attention_mask,
             output_attentions,
-            output_hidden_state,
+            output_hidden_states,
             return_dict,
         )
         logits = transducer_outputs.logits
@@ -639,15 +639,16 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
     def get_audio_length(self, audios, labels) -> None:
         return
 
-    def inference_test_2(self, audio_input: torch.Tensor) -> None:
+    @torch.no_grad()
+    def test_greedy_search(self, audio_input: torch.Tensor) -> None:
         token_list = [self.config.blank_id]
         blank_token = torch.tensor([token_list], device=self.device)
-        dec_state = self.label_encoder(blank_token)
+        dec_state = self._label_encoder(blank_token)
         dec_state = dec_state.last_hidden_state[:, -1, :]
         lengths = audio_input.shape[0]
 
         for t in range(lengths):
-            joint_outputs = self.joint_network(audio_input[t].view(-1), dec_state.view(-1))
+            joint_outputs = self._joint_network(audio_input[t].view(-1), dec_state.view(-1))
             hidden_state = joint_outputs.hidden_state
             logits = hidden_state.log_softmax(dim=-1)
 
@@ -660,11 +661,12 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
 
                 if audio_input.is_cuda:
                     token = token.cuda()
-                dec_state = self.label_encoder(token)
+                dec_state = self._label_encoder(token)
                 dec_state = dec_state.last_hidden_state[:, -1, :]
         return token_list[1:]
 
-    def beam_search(self, enc_state, lengths, beam_width=5):
+    @torch.no_grad()
+    def test_beam_search(self, enc_state, lengths, beam_width=5):
         first = True
         device = torch.device("cuda" if enc_state.is_cuda else "cpu")
         token_list = []  # len=beam_width
@@ -676,42 +678,19 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
             token_list.append([0])
         for i in range(beam_width):
             token_child_list.append([])
-            for j in range(beam_width):
+            for _ in range(beam_width):
                 token_child_list[i].append([0])
-
-        """
-        token_list:
-        [
-            [0],
-            [0],
-            [0],
-            [0],
-            [0],
-
-            --> [0,1,2,3,4,5,6, n......]
-            1차원인 듯
-        ]
-        token_child_list:
-        [ top_k개 만큼의 예상되는 단어들을 각 list에다가 담아두는 건가?
-            [[0], [0], [0], [0], [0]],
-            [[0], [0], [0], [0], [0]],
-            [[0], [0], [0], [0], [0]],
-            [[0], [0], [0], [0], [0]],
-            [[0], [0], [0], [0], [0]],
-            
-        ]
-
-        """
-
         for t in range(lengths):
 
             max_index = probability.argmax()  # 첫 시작에는 0이 출력됨
             token = torch.tensor([token_list[max_index]], dtype=torch.long).to(device)
             # todo：标签也增加mask？
             # token_mask = look_ahead_mask(token)[:, :, None]
-            dec_state = self.decoder(token)
-            dec_state = dec_state[:, -1, :]
-            logits = self.joint(enc_state[t].view(-1), dec_state.view(-1))
+            dec_state = self._label_encoder(token)
+            dec_state = dec_state.last_hidden_state[:, -1, :]
+            joint_outputs = self._joint_network(enc_state[t].view(-1), dec_state.view(-1))
+            logits = joint_outputs.hidden_state
+
             # out = F.softmax(logits, dim=0).detach()
             out = logits.softmax(dim=-1)
             pred_max = torch.argmax(out, dim=0)
@@ -721,18 +700,21 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
             if pred_max != 0:
                 for token_index in range(len(token_list)):
                     token = torch.tensor([token_list[token_index]], dtype=torch.long).to(device)
-                    dec_state = self.decoder(token)[:, -1, :]
-                    logits = self.joint(enc_state[t].view(-1), dec_state.view(-1))
+                    dec_state = self._label_encoder(token)
+                    dec_state = dec_state.last_hidden_state[:, -1, :]
+
+                    joint_outputs = self._joint_network(enc_state[t].view(-1), dec_state.view(-1))
+                    logits = joint_outputs.hidden_state
                     # out = F.softmax(logits, dim=0).detach()  # 1차원 배열
                     out = logits.softmax(dim=-1)
                     values, indices = torch.topk(out, k=beam_width + 1, dim=0)
                     values = values.tolist()
                     indices = indices.tolist()
-                    if 0 in indices:  # 有0则去掉零
+                    if 0 in indices:
                         zero_index = indices.index(0)
                         indices.pop(zero_index)
                         values.pop(zero_index)
-                    else:  # 没0则去掉最后一个
+                    else:
                         indices.pop(-1)
                         values.pop(-1)
                     if first:

@@ -405,10 +405,10 @@ class JointNetwork(nn.Module):
     def __init__(self, config: PretrainedConfig) -> None:
         super().__init__()
 
-        # self.audio_linear = nn.Linear(config.hidden_size, config.intermediate_size)
-        # self.label_linear = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.audio_linear = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.label_linear = nn.Linear(config.hidden_size, config.intermediate_size)
         self.tanh = nn.Tanh()
-        self.dense = nn.Linear(config.hidden_size, config.vocab_size)
+        self.dense = nn.Linear(config.intermediate_size, config.vocab_size)
 
     def forward(
         self,
@@ -422,8 +422,16 @@ class JointNetwork(nn.Module):
                 Linear(LabelEncoder(Labels(z_1:(i-1))))
         와 같이 적혀져 있기 때문에 Linear로 합치는 부분 까지를 joint network로 지정한다.
         """
-        # audio_output = self.audio_linear(audio_output)
-        # label_output = self.label_linear(label_output)
+        if audio_vector.dim() == 3 and label_vector.dim() == 3
+            audio_vector = audio_vector[:, :, None, :]
+            label_vector = label_vector[:, None, :, :]
+            # [NOTE]: 굳이 여길 [:, None, :, :]와 같이 한 이유
+            #         더 직관적이기 때문에, joint_nec은 값을 4차원으로 확장시킨 다음에 그 값을 합치는 역할을 수행한다.
+            #         그렇기 깨문에 계산에 수행되는 값은 4차원 이라는 것을 간접적으로 알려주기 위해서 위와 같은 방법을 사용했다.
+            #         물론 .unsqueeze와 같은 방법이 있지만 그러면 차이 어느정도 인지 확인할 수 없기에 이 방법은 제외했다.
+
+        audio_vector = self.audio_linear(audio_vector)
+        label_vector = self.label_linear(label_vector)
 
         concat_vector = audio_vector + label_vector
         concat_vector = self.tanh(concat_vector)
@@ -465,7 +473,6 @@ class TransducerModel(TransducerPretrainedModel):
             return_dict,
         )
         audio_hiddens = audio_outputs.last_hidden_state
-        audio_hiddens = audio_hiddens[:, :, None, :]
 
         label_outputs = self.label_encoder(
             labels,
@@ -475,17 +482,20 @@ class TransducerModel(TransducerPretrainedModel):
             return_dict,
         )
         label_hiddens = label_outputs.last_hidden_state
-        label_hiddens = label_hiddens[:, None, :, :]
 
         joint_outputs = self.joint_network(audio_hiddens, label_hiddens, return_dict)
         hidden_states = joint_outputs.hidden_state
+
         if not self.training and is_main_process(dist.get_rank()):
             print(self.inference_test_2(audio_outputs.last_hidden_state[0]))
 
         if not return_dict:
             return (hidden_states, audio_hiddens, label_hiddens) + audio_outputs[1:] + label_outputs[1:]
 
-        return TransducerBaseModelOutput(logits=hidden_states)
+        # [BUG]: audio_hiddens를 출력할 때 차원이 [:, :, None, :]된 상태의 hidden_state값이 출려된다. 수정할 것!
+        #        수정을 해야 하는 이유는 저 audio_hiddens의 값을 valid시 사용할 것이기 때문에
+
+        return TransducerBaseModelOutput(logits=hidden_states, audio_last_hidden_state=audio_hiddens)
 
     def get_chunk_attetion_mask(self) -> torch.Tensor:
         return
@@ -588,9 +598,51 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
     def get_audio_length(self, audios, labels) -> None:
         return
 
-    def generate(self, audio_input: torch.Tensor, audio_mask: torch.Tensor) -> None:
-        self.transducer.audio_encoder(audio_input, audio_mask)
-        self.transducer.label_encoder.layers
-        self.transducer.joint_network
+    @torch.no_grad()
+    def test_greedy_search(self, audio_input: torch.Tensor, audio_mask: torch.Tensor) -> None:
+        self._audio_encoder
+        self._label_encoder
+        self._joint_network
+        
+        predict_list = list()
 
         return
+
+    def inference_test_2(self, audio_input: torch.Tensor) -> None:
+        token_list = [self.config.blank_id]
+        blank_token = torch.tensor([token_list], device=self.device)
+        dec_state = self.label_encoder(blank_token)
+        dec_state = dec_state.last_hidden_state[:, -1, :]
+        lengths = audio_input.shape[0]
+
+        for t in range(lengths):
+            joint_outputs = self.joint_network(audio_input[t].view(-1), dec_state.view(-1))
+            hidden_state = joint_outputs.hidden_state
+            logits = hidden_state.log_softmax(dim=-1)
+
+            pred = logits.argmax(dim=0)
+            pred = int(pred.item())
+
+            if pred != self.config.blank_id:
+                token_list.append(pred)
+                token = torch.tensor([token_list], dtype=torch.long)
+
+                if audio_input.is_cuda:
+                    token = token.cuda()
+                dec_state = self.label_encoder(token)
+                dec_state = dec_state.last_hidden_state[:, -1, :]
+        return token_list[1:]
+
+    @property
+    def _audio_encoder(self, *args, **kwargs) -> ModelOutput:
+        # or another method is self.transducer.audio_encoder
+        # 그냥 길어지는게 싫어서 이렇게 만들었다.
+        return self.transducer.audio_encoder(*args, **kwargs)
+
+    @property
+    def _label_encoder(self, *args, **kwargs) -> ModelOutput:
+        return self.transducer.label_encoder(*args, **kwargs)
+
+    @property
+    def _joint_network(self, *args, **kwargs) -> ModelOutput:
+        return self.transducer.joint_network(*args, **kwargs)

@@ -14,6 +14,10 @@ from typing import List, Union, Any, Dict
 import numpy as np
 from transformers import PretrainedConfig
 
+# for beamsearch
+import copy
+import heapq
+
 # head_mask는 multi-head attention에서 head의 사용 여부를 결정하는 mask다.
 
 
@@ -422,7 +426,7 @@ class JointNetwork(nn.Module):
                 Linear(LabelEncoder(Labels(z_1:(i-1))))
         와 같이 적혀져 있기 때문에 Linear로 합치는 부분 까지를 joint network로 지정한다.
         """
-        if audio_vector.dim() == 3 and label_vector.dim() == 3
+        if audio_vector.dim() == 3 and label_vector.dim() == 3:
             audio_vector = audio_vector[:, :, None, :]
             label_vector = label_vector[:, None, :, :]
             # [NOTE]: 굳이 여길 [:, None, :, :]와 같이 한 이유
@@ -448,6 +452,7 @@ class TransducerModel(TransducerPretrainedModel):
         self.label_encoder = LabelEncoder(config)
         self.joint_network = JointNetwork(config)
         self.config = config
+        self.mask_type = "chunk-wise"
 
     def forward(
         self,
@@ -461,6 +466,15 @@ class TransducerModel(TransducerPretrainedModel):
     ) -> torch.Tensor:
         # audio_shape = audios.size()
         # audio_attention_mask = self.get_extended_attention_mask(audio_attention_mask, audio_shape)
+
+        if audio_attention_mask.dim() == 2 and "chunk" in self.mask_type:
+            pass
+
+        if audio_attention_mask.dim() == 2 and "diagonal" in self.mask_type:
+            pass
+
+        if audio_attention_mask.dim() == 2 and "full" in self.mask_type:
+            pass
 
         label_shape = labels.size()
         label_attention_mask = self.create_extended_attention_mask_for_decoder(label_shape, label_attention_mask)
@@ -497,7 +511,34 @@ class TransducerModel(TransducerPretrainedModel):
 
         return TransducerBaseModelOutput(logits=hidden_states, audio_last_hidden_state=audio_hiddens)
 
-    def get_chunk_attetion_mask(self) -> torch.Tensor:
+    def create_chunk_attetion_mask(
+        self,
+        attention_mask: torch.Tensor,
+        input_shape: Tuple[int],
+        device: torch.device = None,
+        dtype: torch.float = None,
+    ) -> torch.Tensor:
+
+        mask_size = attention_mask.shape[1]
+        base_map = torch.diag(attention_mask)
+        chunk_size = 3
+        chunk_mask = torch.ones([(chunk_size * 2), chunk_size])
+        mask_x_dim = chunk_mask.shape[1]
+        mask_y_dim = chunk_mask.shape[0]
+
+        for mask_idx in range(0, mask_size, chunk_size):
+            mask_x_pos = mask_idx + mask_x_dim
+            mask_y_pos = mask_idx + mask_y_dim
+
+            if mask_y_pos > mask_size:  # for y, 이 부분은 chunk_mask가 끝 부분과 맞지 않을 때 일부러 짤라내는 부분이다.
+                truncate_size = mask_y_dim - (mask_y_pos - mask_size)
+                chunk_mask = chunk_mask[:truncate_size, :]
+
+            if mask_x_pos > mask_size:  # for x
+                truncate_size = mask_x_dim - (mask_x_pos - mask_size)
+                chunk_mask = chunk_mask[:, :truncate_size]
+
+            base_map[mask_idx:mask_y_pos, mask_idx:mask_x_pos] = chunk_mask
         return
 
     @torch.no_grad()
@@ -598,16 +639,6 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
     def get_audio_length(self, audios, labels) -> None:
         return
 
-    @torch.no_grad()
-    def test_greedy_search(self, audio_input: torch.Tensor, audio_mask: torch.Tensor) -> None:
-        self._audio_encoder
-        self._label_encoder
-        self._joint_network
-        
-        predict_list = list()
-
-        return
-
     def inference_test_2(self, audio_input: torch.Tensor) -> None:
         token_list = [self.config.blank_id]
         blank_token = torch.tensor([token_list], device=self.device)
@@ -631,6 +662,101 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                     token = token.cuda()
                 dec_state = self.label_encoder(token)
                 dec_state = dec_state.last_hidden_state[:, -1, :]
+        return token_list[1:]
+
+    def beam_search(self, enc_state, lengths, beam_width=5):
+        first = True
+        device = torch.device("cuda" if enc_state.is_cuda else "cpu")
+        token_list = []  # len=beam_width
+        probability = np.zeros((beam_width,), dtype=float)
+        token_child_list = []  # len=beam_width**2
+        probability_child = np.zeros((beam_width, beam_width), dtype=float)
+        # [NOTE]: beam_width 만큼의 list를 만든다음 그 리스트에 값들을 차례대로 넣어가며 예측한다.
+        for i in range(beam_width):
+            token_list.append([0])
+        for i in range(beam_width):
+            token_child_list.append([])
+            for j in range(beam_width):
+                token_child_list[i].append([0])
+
+        """
+        token_list:
+        [
+            [0],
+            [0],
+            [0],
+            [0],
+            [0],
+
+            --> [0,1,2,3,4,5,6, n......]
+            1차원인 듯
+        ]
+        token_child_list:
+        [ top_k개 만큼의 예상되는 단어들을 각 list에다가 담아두는 건가?
+            [[0], [0], [0], [0], [0]],
+            [[0], [0], [0], [0], [0]],
+            [[0], [0], [0], [0], [0]],
+            [[0], [0], [0], [0], [0]],
+            [[0], [0], [0], [0], [0]],
+            
+        ]
+
+        """
+
+        for t in range(lengths):
+
+            max_index = probability.argmax()  # 첫 시작에는 0이 출력됨
+            token = torch.tensor([token_list[max_index]], dtype=torch.long).to(device)
+            # todo：标签也增加mask？
+            # token_mask = look_ahead_mask(token)[:, :, None]
+            dec_state = self.decoder(token)
+            dec_state = dec_state[:, -1, :]
+            logits = self.joint(enc_state[t].view(-1), dec_state.view(-1))
+            # out = F.softmax(logits, dim=0).detach()
+            out = logits.softmax(dim=-1)
+            pred_max = torch.argmax(out, dim=0)
+            pred_max = int(pred_max.item())
+            # 여기까지는 일반적인 transducer inference와 동일함
+
+            if pred_max != 0:
+                for token_index in range(len(token_list)):
+                    token = torch.tensor([token_list[token_index]], dtype=torch.long).to(device)
+                    dec_state = self.decoder(token)[:, -1, :]
+                    logits = self.joint(enc_state[t].view(-1), dec_state.view(-1))
+                    # out = F.softmax(logits, dim=0).detach()  # 1차원 배열
+                    out = logits.softmax(dim=-1)
+                    values, indices = torch.topk(out, k=beam_width + 1, dim=0)
+                    values = values.tolist()
+                    indices = indices.tolist()
+                    if 0 in indices:  # 有0则去掉零
+                        zero_index = indices.index(0)
+                        indices.pop(zero_index)
+                        values.pop(zero_index)
+                    else:  # 没0则去掉最后一个
+                        indices.pop(-1)
+                        values.pop(-1)
+                    if first:
+                        for i in range(len(indices)):
+                            token_child_list[i][token_index].append(indices[i])
+                            probability_child[:, token_index] = np.log(values)
+                    else:
+                        for i in range(len(indices)):
+                            token_child_list[token_index][i].append(indices[i])
+                            probability_child[token_index] = probability[token_index] + np.log(values)
+                    # print(token.tolist(), np.log(values), indices)
+                if first:
+                    first = False
+                    for i in range(beam_width):
+                        token_list[i] = copy.deepcopy(token_child_list[i][0])
+                        probability[i] = copy.deepcopy(probability_child[i, 0])
+                else:
+                    top_k_index = heapq.nlargest(beam_width, range(beam_width**2), probability_child.take)
+                    for i in range(len(top_k_index)):
+                        index = top_k_index[i]
+                        probability[i] = copy.deepcopy(probability_child[index // beam_width, index % beam_width])
+                        token_list[i] = copy.deepcopy(token_child_list[index // beam_width][index % beam_width])
+        max_index = probability.argmax()
+        token_list = token_list[max_index]
         return token_list[1:]
 
     @property

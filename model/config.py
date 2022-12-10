@@ -32,3 +32,23 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.model_test = True
         self.pruned_heads = False
         self.initializer_range = 0.02
+        self.output_attentions = False
+        self.output_hidden_states = False
+        self.max_length = 512
+        self.num_beams = 1
+        self.is_encoder_decoder = True
+        self.bos_token_id = 1
+        self.eos_token_id = 2
+        self.pad_token_id = 0
+
+        self.num_return_sequences = 1
+        self.early_stopping = True
+        self.num_beam_groups = 1
+        self.length_penalty = 1.0
+
+        self.do_sample = False
+
+        self.output_scores = False
+        self.output_attentions = False
+        self.output_hidden_states = False
+        self.return_dict_in_generate = True

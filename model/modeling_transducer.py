@@ -63,7 +63,7 @@ class RNNTBaseOutput(ModelOutput):
 class TransducerPretrainedModel(PreTrainedModel):
     config_class = TransformerTransducerConfig
     base_model_prefix = "transformertransducer"
-    main_input_name = "input_values"
+    main_input_name = "input_features"
     _keys_to_ignore_on_load_missing = [r"position_ids"]
     supports_gradient_checkpointing = True
 
@@ -395,8 +395,10 @@ class AudioEncoder(nn.Module):
             if attention_mask is not None:
                 attention_mask = attention_mask.squeeze(1)
                 attention_mask = attention_mask.repeat(self.head_size, 1, 1)
+                # [NOTE]: if full attention일 경우
+                attention_mask = attention_mask.repeat(1, attention_mask.shape[2], 1)
 
-            hidden_state = self.encoder(hidden_state, ~attention_mask.bool())
+            hidden_state = self.encoder(hidden_state, attention_mask.bool())
         else:
             for layer in self.layers:
                 hidden_state = layer(hidden_state, attention_mask)
@@ -452,10 +454,19 @@ class TransducerModel(TransducerPretrainedModel):
         self.label_encoder = LabelEncoder(config)
         self.joint_network = JointNetwork(config)
         self.config = config
-        self.mask_type = "diagonal"
+        self.mask_type = "full"
         self.chunk_size = 3
         self.left = 10
         self.right = 3
+
+    def get_encoder(self) -> nn.Module:
+        return self.audio_encoder
+
+    def get_decoder(self) -> nn.Module:
+        return self.label_encoder
+
+    def get_joiner(self) -> nn.Module:
+        return self.joint_network
 
     def forward(
         self,
@@ -580,7 +591,7 @@ class TransducerModel(TransducerPretrainedModel):
 
 
 class TransformerTranducerForRNNT(TransducerPretrainedModel):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PretrainedConfig) -> None:
         super().__init__(config)
         self.config = config
 
@@ -592,11 +603,20 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
 
         self.post_init()
 
+    def get_encoder(self) -> nn.Module:
+        return self.transducer.get_encoder()
+
+    def get_decoder(self) -> nn.Module:
+        return self.transducer.get_decoder()
+
+    def get_joiner(self) -> nn.Module:
+        return self.transducer.get_joiner()
+
     def forward(
         self,
         input_features: Optional[torch.Tensor],
-        audio_attention_mask: Optional[torch.Tensor] = None,
-        label_attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        decoder_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
@@ -604,14 +624,14 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
     ) -> torch.Tensor:
 
         # [BUG]: pad되어 있는 부분에는 chunk_size attention_mask를 적용시키면 안될거 같은데?
-        input_length = audio_attention_mask.sum(-1, dtype=torch.int32)
+        input_length = attention_mask.sum(-1, dtype=torch.int32)
         label_len = (labels != 0).sum(dim=-1) - 1
 
         transducer_outputs = self.transducer(
             input_features,
             labels,
-            audio_attention_mask,
-            label_attention_mask,
+            attention_mask,
+            decoder_attention_mask,
             output_attentions,
             output_hidden_states,
             return_dict,
@@ -637,6 +657,9 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         return RNNTBaseOutput(loss=loss, logits=logits)
 
     def get_audio_length(self, audios, labels) -> None:
+        return
+
+    def prepare_inputs_for_generation(self) -> None:
         return
 
     @torch.no_grad()
@@ -740,17 +763,3 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         max_index = probability.argmax()
         token_list = token_list[max_index]
         return token_list[1:]
-
-    @property
-    def _audio_encoder(self, *args, **kwargs) -> ModelOutput:
-        # or another method is self.transducer.audio_encoder
-        # 그냥 길어지는게 싫어서 이렇게 만들었다.
-        return self.transducer.audio_encoder(*args, **kwargs)
-
-    @property
-    def _label_encoder(self, *args, **kwargs) -> ModelOutput:
-        return self.transducer.label_encoder(*args, **kwargs)
-
-    @property
-    def _joint_network(self, *args, **kwargs) -> ModelOutput:
-        return self.transducer.joint_network(*args, **kwargs)

@@ -7,8 +7,7 @@ from transformers.feature_extraction_sequence_utils import SequenceFeatureExtrac
 
 
 class TransducerCollator:
-
-    max_length: int = 504
+    max_length: int = 400
 
     def __init__(
         self,
@@ -49,18 +48,17 @@ class TransducerCollator:
 
         input_values = self.extractor.compress_features(input_values)
         input_values = [{"input_features": features} for features in input_values]
-        labels = [{"input_values": np.insert(label, 0, 2)[:512]} for label in labels]
+        labels = [{"input_values": np.insert(label, 0, 0)[:512]} for label in labels]
 
         batch = self.extractor.pad(
             input_values,
             padding=True,
-            max_length=400,
+            max_length=self.max_length,
             truncation=True,
             return_attention_mask=True,
             return_tensors="pt",
         )
-        batch["audio_attention_mask"] = batch.pop("attention_mask")
-        # batch = self._audio_pad_2(input_values)
+
         labels = self.tokenizer.pad(
             labels,
             padding=True,
@@ -69,6 +67,6 @@ class TransducerCollator:
         )
 
         batch["labels"] = labels["input_values"]
-        batch["label_attention_mask"] = labels["attention_mask"]
+        batch["decoder_attention_mask"] = labels["attention_mask"]
 
         return batch

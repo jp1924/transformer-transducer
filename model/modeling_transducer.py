@@ -768,7 +768,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
 
         # [BUG]: pad되어 있는 부분에는 chunk_size attention_mask를 적용시키면 안될거 같은데?
         input_length = attention_mask.sum(-1, dtype=torch.int32)
-        label_len = (labels != 0).sum(dim=-1) - 1
+        label_len = (labels != 0).sum(dim=-1)
 
         transducer_outputs = self.transducer(
             input_features,

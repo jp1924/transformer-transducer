@@ -1,24 +1,95 @@
-import torch
-from dataclasses import dataclass
-import torch.nn as nn
-from torchaudio.functional import rnnt_loss
-from transformers.activations import ACT2FN
-from transformers.utils import ModelOutput
-from transformers.modeling_utils import PreTrainedModel
-import math
-from typing import Optional, Tuple
-from .config import TransformerTransducerConfig
-import torch.distributed as dist
-from transformers.trainer_utils import is_main_process
-from typing import List, Union, Any, Dict
-import numpy as np
-from transformers import PretrainedConfig
-
-# for beamsearch
 import copy
 import heapq
+import math
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-# head_mask는 multi-head attention에서 head의 사용 여부를 결정하는 mask다.
+import numpy as np
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+from torchaudio.functional import rnnt_loss
+from transformers import PretrainedConfig
+from transformers.activations import ACT2FN
+from transformers.generation_logits_process import LogitsProcessorList
+from transformers.generation_stopping_criteria import StoppingCriteriaList, validate_stopping_criteria
+from transformers.modeling_utils import PreTrainedModel
+from transformers.utils import ModelOutput
+
+from .config import TransformerTransducerConfig
+
+
+@dataclass
+class GreedySearchDecoderOnlyOutput(ModelOutput):
+    """
+    Base class for outputs of decoder-only generation models using greedy search.
+
+
+    Args:
+        sequences (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
+            if all batches finished early due to the `eos_token_id`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
+            at each generation step. Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one element for
+            each generated token), with each tensor of shape `(batch_size, config.vocab_size)`.
+        attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
+        hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, generated_length, hidden_size)`.
+    """
+
+    sequences: torch.LongTensor = None
+    scores: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+
+
+@dataclass
+class GreedySearchEncoderDecoderOutput(ModelOutput):
+    """
+    Base class for outputs of encoder-decoder generation models using greedy search. Hidden states and attention
+    weights of the decoder (respectively the encoder) can be accessed via the encoder_attentions and the
+    encoder_hidden_states attributes (respectively the decoder_attentions and the decoder_hidden_states attributes)
+
+
+    Args:
+        sequences (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
+            if all batches finished early due to the `eos_token_id`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
+            at each generation step. Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one element for
+            each generated token), with each tensor of shape `(batch_size, config.vocab_size)`.
+        encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer of the decoder) of shape `(batch_size, num_heads,
+            sequence_length, sequence_length)`.
+        encoder_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+        decoder_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
+        cross_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
+        decoder_hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, generated_length, hidden_size)`.
+    """
+
+    sequences: torch.LongTensor = None
+    scores: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    decoder_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    cross_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    decoder_hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+
+
+GreedySearchOutput = Union[GreedySearchEncoderDecoderOutput, GreedySearchDecoderOnlyOutput]
 
 
 @dataclass
@@ -26,8 +97,6 @@ class EncoderOutput(ModelOutput):
     last_hidden_state: torch.Tensor
     hidden_states: torch.Tensor = None
     attentions: torch.Tensor = None
-
-    # or need audio encoder output, label encoder output
 
 
 @dataclass
@@ -293,8 +362,7 @@ class LabelEncoder(nn.Module):
     def __init__(self, config: PretrainedConfig) -> None:
         super(LabelEncoder, self).__init__()
         self.config = config
-        self.test = config.model_test
-        if self.test:
+        if True:
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=config.hidden_size,
                 nhead=config.num_attention_heads,
@@ -318,20 +386,23 @@ class LabelEncoder(nn.Module):
 
     def forward(
         self,
-        label_data: Optional[torch.Tensor],
+        labels: Optional[torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
     ) -> torch.Tensor:
-        position_ids = self.position_ids[: label_data.shape[1]]
-        position_ids = position_ids.to(label_data.device)
+
+        input_len = labels.shape[1] if labels.dim() == 2 else labels.shape[0]
+
+        position_ids = self.position_ids[:input_len]
+        position_ids = position_ids.to(labels.device)
         position_embed = self.position_embedding(position_ids)
-        word_embed = self.word_embedding(label_data)
+        word_embed = self.word_embedding(labels)
 
         hidden_state = word_embed + position_embed
 
-        if self.test:
+        if True:
             if attention_mask is not None:
                 attention_mask = attention_mask.squeeze(1).bool()
                 attention_mask = attention_mask.repeat(self.head_size, 1, 1)
@@ -352,8 +423,11 @@ class AudioEncoder(nn.Module):
         super(AudioEncoder, self).__init__()
         self.config = config
         # self.position_embedding = PositionalEncoding(config.hidden_size)
-        self.test = config.model_test
-        if self.test:
+        self.mask_type = "chunk"
+        self.chunk_size = 3
+        self.left = 10
+        self.right = 3
+        if True:
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=config.hidden_size,
                 nhead=config.num_attention_heads,
@@ -380,31 +454,100 @@ class AudioEncoder(nn.Module):
 
     def forward(
         self,
-        audio_data: Optional[torch.Tensor],
+        input_features: Optional[torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
     ) -> torch.Tensor:
-        if self.test:
-            time_seq = audio_data.shape[1]
-            position_ids = torch.arange(512, device=audio_data.device)
+        feature_shape = input_features.size()
+
+        if attention_mask.dim() == 2 and "chunk" in self.mask_type:
+            attention_mask = self.create_chunk_attention_mask(attention_mask, feature_shape)
+        elif attention_mask.dim() == 2 and "diagonal" in self.mask_type:
+            attention_mask = self.create_diag_attention_mask(attention_mask, feature_shape)
+
+        if True:
+            time_seq = input_features.shape[1]
+            position_ids = torch.arange(512, device=input_features.device)
             position_vector = self.position_embedding(position_ids[:time_seq])
-            hidden_state = audio_data + position_vector
+            hidden_state = input_features + position_vector
 
             if attention_mask is not None:
                 attention_mask = attention_mask.squeeze(1)
                 attention_mask = attention_mask.repeat(self.head_size, 1, 1)
                 # [NOTE]: if full attention일 경우
-                attention_mask = attention_mask.repeat(1, attention_mask.shape[2], 1)
+                # attention_mask = attention_mask.repeat(1, attention_mask.shape[2], 1)
 
             hidden_state = self.encoder(hidden_state, attention_mask.bool())
         else:
             for layer in self.layers:
                 hidden_state = layer(hidden_state, attention_mask)
+
         if not return_dict:
             return None
+
         return EncoderOutput(hidden_state)
+
+    def create_chunk_attention_mask(
+        self,
+        attention_mask: torch.Tensor,
+        input_shape: Tuple[int],
+        dtype: torch.float = torch.float,
+    ) -> torch.Tensor:
+        if dtype is None:
+            dtype = self.dtype
+
+        # [NOTE]: batch_size, mel_seq값은 사용하지 않지만 굳이 만든 이유는 input되는 audio_features의 차원 값을 알려줄 수 있기 때문에 명시함
+        batch_size, time_seq, mel_seq = input_shape
+        chunk_mask = attention_mask[0].diag()
+        mask = torch.ones([(self.chunk_size * 2), self.chunk_size])
+
+        mask_x_dim = mask.shape[1]
+        mask_y_dim = mask.shape[0]
+
+        for mask_idx in range(0, time_seq, self.chunk_size):
+            mask_x_pos = mask_idx + mask_x_dim
+            mask_y_pos = mask_idx + mask_y_dim
+
+            if mask_y_pos > time_seq:  # for y, 이 부분은 mask가 끝 부분과 맞지 않을 때 일부러 짤라내는 부분이다.
+                truncate_size = mask_y_dim - (mask_y_pos - time_seq)
+                mask = mask[:truncate_size, :]
+
+            if mask_x_pos > time_seq:  # for x
+                truncate_size = mask_x_dim - (mask_x_pos - time_seq)
+                mask = mask[:, :truncate_size]
+
+            chunk_mask[mask_idx:mask_y_pos, mask_idx:mask_x_pos] = mask
+
+        chunk_attention_mask = torch.stack([chunk_mask for _ in range(batch_size)])
+        chunk_attention_mask = chunk_attention_mask.to(dtype)
+        chunk_attention_mask = chunk_attention_mask[:, None, :, :]
+
+        return chunk_attention_mask
+
+    def create_diag_attention_mask(
+        self,
+        attention_mask: torch.Tensor,
+        input_shape: Tuple[int],
+        dtype: torch.float = None,
+    ) -> torch.Tensor:
+        if dtype is None:
+            dtype = self.dtype
+        batch_size, time_seq, mel_seq = input_shape
+        diag_mask = attention_mask[0].new_ones(time_seq, time_seq)
+
+        right_mask = diag_mask.triu(self.right)
+        left_mask = diag_mask.tril(-self.left)
+
+        diag_mask = left_mask + right_mask
+
+        diag_attention_mask = torch.stack([diag_mask for _ in range(batch_size)])
+        diag_attention_mask = diag_attention_mask.to(dtype)
+        diag_attention_mask = diag_attention_mask[:, None, :, :]
+
+        # [TODO]: 나중에 huggingface encoder 사용할 때 제거할 것!!!
+        return diag_attention_mask == 0
 
 
 class JointNetwork(nn.Module):
@@ -454,7 +597,7 @@ class TransducerModel(TransducerPretrainedModel):
         self.label_encoder = LabelEncoder(config)
         self.joint_network = JointNetwork(config)
         self.config = config
-        self.mask_type = "full"
+        self.mask_type = "chunk"
         self.chunk_size = 3
         self.left = 10
         self.right = 3
@@ -470,36 +613,36 @@ class TransducerModel(TransducerPretrainedModel):
 
     def forward(
         self,
-        audios: Optional[torch.Tensor],
+        input_features: Optional[torch.Tensor],
         labels: Optional[torch.Tensor] = None,
-        audio_attention_mask: Optional[torch.Tensor] = None,
-        label_attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        decoder_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
     ) -> torch.Tensor:
-        audio_shape = audios.size()
+        feature_shape = input_features.size()
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if audio_attention_mask.dim() == 2 and "chunk" in self.mask_type:
-            audio_attention_mask = self.create_chunk_attention_mask(audio_attention_mask, audio_shape)
-        elif audio_attention_mask.dim() == 2 and "full" in self.mask_type:
-            audio_attention_mask = self.get_extended_attention_mask(audio_attention_mask, audio_shape)
-        elif audio_attention_mask.dim() == 2 and "diagonal" in self.mask_type:
-            audio_attention_mask = self.create_diag_attention_mask(audio_attention_mask, audio_shape)
+        if attention_mask.dim() == 2 and "chunk" in self.mask_type:
+            attention_mask = self.create_chunk_attention_mask(attention_mask, feature_shape)
+        elif attention_mask.dim() == 2 and "full" in self.mask_type:
+            attention_mask = self.get_extended_attention_mask(attention_mask, feature_shape)
+        elif attention_mask.dim() == 2 and "diagonal" in self.mask_type:
+            attention_mask = self.create_diag_attention_mask(attention_mask, feature_shape)
         else:
             raise ValueError("값을 확인하는게 불가능!!!!")
 
         label_shape = labels.size()
-        label_attention_mask = self.create_extended_attention_mask_for_decoder(label_shape, label_attention_mask)
+        decoder_attention_mask = self.create_extended_attention_mask_for_decoder(label_shape, decoder_attention_mask)
 
         audio_outputs = self.audio_encoder(
-            audios,
-            audio_attention_mask,
+            input_features,
+            attention_mask,
             output_attentions,
             output_hidden_states,
             return_dict,
@@ -508,7 +651,7 @@ class TransducerModel(TransducerPretrainedModel):
 
         label_outputs = self.label_encoder(
             labels,
-            label_attention_mask,
+            decoder_attention_mask,
             output_attentions,
             output_hidden_states,
             return_dict,
@@ -621,7 +764,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
         labels: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> RNNTBaseOutput:
 
         # [BUG]: pad되어 있는 부분에는 chunk_size attention_mask를 적용시키면 안될거 같은데?
         input_length = attention_mask.sum(-1, dtype=torch.int32)
@@ -652,41 +795,107 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
             clamp=-1,
             reduction=self.reduction,
         )
-
         torch.cuda.empty_cache()
+
         return RNNTBaseOutput(loss=loss, logits=logits)
 
     def get_audio_length(self, audios, labels) -> None:
         return
 
-    def prepare_inputs_for_generation(self) -> None:
-        return
+    def prepare_inputs_for_generation(
+        self,
+        input_features: torch.Tensor,
+        labels: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        decoder_attention_mask: Optional[torch.Tensor],
+    ) -> Dict[str, Any]:
+        return {
+            "input_features": input_features,
+            "labels": labels,
+            "attention_mask": attention_mask,
+            "decoder_attention_mask": decoder_attention_mask,
+        }
 
-    @torch.no_grad()
-    def test_greedy_search(self, audio_input: torch.Tensor) -> None:
-        token_list = [self.config.blank_id]
-        blank_token = torch.tensor([token_list], device=self.device)
-        dec_state = self._label_encoder(blank_token)
-        dec_state = dec_state.last_hidden_state[:, -1, :]
-        lengths = audio_input.shape[0]
+    def greedy_search(
+        self,
+        input_features: torch.LongTensor,
+        encoder_outputs: torch.FloatTensor,
+        logits_processor: Optional[LogitsProcessorList] = None,
+        stopping_criteria: Optional[StoppingCriteriaList] = None,
+        max_length: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_scores: Optional[bool] = None,
+        return_dict_in_generate: Optional[bool] = None,
+        synced_gpus: Optional[bool] = False,
+        **model_kwargs,
+    ) -> Union[GreedySearchOutput, torch.LongTensor]:
 
-        for t in range(lengths):
-            joint_outputs = self._joint_network(audio_input[t].view(-1), dec_state.view(-1))
-            hidden_state = joint_outputs.hidden_state
-            logits = hidden_state.log_softmax(dim=-1)
+        logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
+        stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
+        if max_length is not None:
+            warnings.warn(
+                "`max_length` is deprecated in this function, use"
+                " `stopping_criteria=StoppingCriteriaList([MaxLengthCriteria(max_length=max_length)])` instead.",
+                UserWarning,
+            )
+            stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
+        pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
+        eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
+        output_scores = output_scores if output_scores is not None else self.config.output_scores
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict_in_generate = (
+            return_dict_in_generate if return_dict_in_generate is not None else self.config.return_dict_in_generate
+        )
 
-            pred = logits.argmax(dim=0)
-            pred = int(pred.item())
+        # init attention / hidden states / scores tuples
+        scores = () if (return_dict_in_generate and output_scores) else None
+        decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
+        cross_attentions = () if (return_dict_in_generate and output_attentions) else None
+        decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
 
-            if pred != self.config.blank_id:
-                token_list.append(pred)
-                token = torch.tensor([token_list], dtype=torch.long)
+        encoder_state = encoder_outputs.last_hidden_state
 
-                if audio_input.is_cuda:
-                    token = token.cuda()
-                dec_state = self._label_encoder(token)
-                dec_state = dec_state.last_hidden_state[:, -1, :]
-        return token_list[1:]
+        blank_id = self.config.blank_id
+
+        decoder = self.get_decoder()
+        joint_network = self.get_joiner()
+
+        decoder_outputs = decoder(input_features)
+        decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+
+        state_iter = enumerate(zip(encoder_state, decoder_state))
+        result_list = list()
+        for batch_idx, (audio_logits, decoder_state) in state_iter:
+            # decoder_outputs = decoder(start_token)
+            # decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+            time_seq = audio_logits.shape[0]
+            reuslt_ids = input_features[batch_idx]
+
+            for time_idx in range(time_seq):
+                current_state = audio_logits[time_idx]
+                # [NOTE]: just output 1d tensor
+                joint_outputs = joint_network(current_state, decoder_state)
+                joint_state = joint_outputs.hidden_state
+
+                log_prob = joint_state.log_softmax(dim=-1)
+                token_id = log_prob.argmax(dim=-0)
+                if blank_id not in token_id:
+                    token_id = token_id.unsqueeze(0)
+                    concat_frame = [reuslt_ids, token_id]
+                    reuslt_ids = torch.concat(concat_frame, dim=-1)
+
+                    decoder_outputs = decoder(reuslt_ids.unsqueeze(0))
+                    decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+
+            result_list.append(reuslt_ids)
+
+        return torch.stack(result_list)[:, 1:]
 
     @torch.no_grad()
     def test_beam_search(self, enc_state, lengths, beam_width=5):

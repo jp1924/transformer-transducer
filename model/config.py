@@ -26,29 +26,50 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.position_embedding_type = "absolute"
 
         self.loss_reduction = "mean"
+        self.is_decoder = False
         self.blank_id = 0
         self.is_audio = False
         self.mel_size = 80
-        self.model_test = True
+
+        self.bos_token_id = 1
+        self.eos_token_id = 2
+        self.pad_token_id = 0
         self.pruned_heads = False
         self.initializer_range = 0.02
         self.output_attentions = False
         self.output_hidden_states = False
-        self.max_length = 512
-        self.num_beams = 1
         self.is_encoder_decoder = True
-        self.bos_token_id = 1
-        self.eos_token_id = 2
-        self.pad_token_id = 0
 
         self.num_return_sequences = 1
         self.early_stopping = True
-        self.num_beam_groups = 1
         self.length_penalty = 1.0
 
+        # for generate
+        self.max_length = 200
+        self.min_length = 1
         self.do_sample = False
-
+        self.early_stopping = False
+        self.num_beams = 1
+        self.num_beam_groups = 1
+        self.diversity_penalty = 0.0
+        self.temperature = 1.0
+        self.top_k = 50
+        self.top_p = 1.0
+        self.typical_p = 1.0
+        self.repetition_penalty = 1.0
+        self.length_penalty = 1.0
+        self.no_repeat_ngram_size = 0
+        self.encoder_no_repeat_ngram_size = 0
+        self.bad_words_ids = None
+        self.num_return_sequences = 1
+        self.chunk_size_feed_forward = 0
         self.output_scores = False
-        self.output_attentions = False
-        self.output_hidden_states = False
-        self.return_dict_in_generate = True
+        self.return_dict_in_generate = False
+        self.forced_bos_token_id = None
+        self.forced_eos_token_id = None
+        self.remove_invalid_values = False
+        self.exponential_decay_length_penalty = None
+        self.suppress_tokens = None
+        self.begin_suppress_tokens = None
+
+        self.decoder_start_token_id = 0

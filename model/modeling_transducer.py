@@ -1,12 +1,12 @@
 import copy
 import heapq
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from torchaudio.functional import rnnt_loss
 from transformers import PretrainedConfig
@@ -423,7 +423,7 @@ class AudioEncoder(nn.Module):
         super(AudioEncoder, self).__init__()
         self.config = config
         # self.position_embedding = PositionalEncoding(config.hidden_size)
-        self.mask_type = "chunk"
+        self.mask_type = "diagonal"
         self.chunk_size = 3
         self.left = 10
         self.right = 3
@@ -442,7 +442,6 @@ class AudioEncoder(nn.Module):
             self.encoder = nn.TransformerEncoder(encoder_layer, config.audio_layers)
             self.head_size = config.num_attention_heads
             self.position_embedding = nn.Embedding(512, config.hidden_size)
-
         else:
             self.test_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
             self.test_ids = torch.arange(config.position_embed_size)
@@ -496,7 +495,7 @@ class AudioEncoder(nn.Module):
         dtype: torch.float = torch.float,
     ) -> torch.Tensor:
         if dtype is None:
-            dtype = self.dtype
+            dtype = dtype
 
         # [NOTE]: batch_size, mel_seq값은 사용하지 않지만 굳이 만든 이유는 input되는 audio_features의 차원 값을 알려줄 수 있기 때문에 명시함
         batch_size, time_seq, mel_seq = input_shape
@@ -530,10 +529,10 @@ class AudioEncoder(nn.Module):
         self,
         attention_mask: torch.Tensor,
         input_shape: Tuple[int],
-        dtype: torch.float = None,
+        dtype: torch.float = torch.float,
     ) -> torch.Tensor:
         if dtype is None:
-            dtype = self.dtype
+            dtype = dtype
         batch_size, time_seq, mel_seq = input_shape
         diag_mask = attention_mask[0].new_ones(time_seq, time_seq)
 
@@ -597,7 +596,7 @@ class TransducerModel(TransducerPretrainedModel):
         self.label_encoder = LabelEncoder(config)
         self.joint_network = JointNetwork(config)
         self.config = config
-        self.mask_type = "chunk"
+        self.mask_type = "diagonal"
         self.chunk_size = 3
         self.left = 10
         self.right = 3
@@ -880,7 +879,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
             for time_idx in range(time_seq):
                 current_state = audio_logits[time_idx]
                 # [NOTE]: just output 1d tensor
-                joint_outputs = joint_network(current_state, decoder_state)
+                joint_outputs = joint_network(current_state.view(-1), decoder_state.view(-1))
                 joint_state = joint_outputs.hidden_state
 
                 log_prob = joint_state.log_softmax(dim=-1)
@@ -890,21 +889,46 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                     concat_frame = [reuslt_ids, token_id]
                     reuslt_ids = torch.concat(concat_frame, dim=-1)
 
-                    decoder_outputs = decoder(reuslt_ids.unsqueeze(0))
+                    decoder_outputs = decoder(reuslt_ids.unsqueeze(0)[:, 1:])
                     decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+            max_length = 511
+            pad = torch.zeros(max_length - len(reuslt_ids[:max_length]), device=reuslt_ids.device)
+            reuslt_ids = torch.concat([reuslt_ids[:max_length], pad])
 
             result_list.append(reuslt_ids)
 
         return torch.stack(result_list)[:, 1:]
 
-    @torch.no_grad()
-    def test_beam_search(self, enc_state, lengths, beam_width=5):
+    def beam_search(
+        self,
+        enc_state,
+        lengths,
+        beam_width=5,
+
+        input_ids: torch.LongTensor,
+        beam_scorer: BeamScorer,
+        logits_processor: Optional[LogitsProcessorList] = None,
+        stopping_criteria: Optional[StoppingCriteriaList] = None,
+        max_length: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_scores: Optional[bool] = None,
+        return_dict_in_generate: Optional[bool] = None,
+        synced_gpus: Optional[bool] = False,
+        **model_kwargs,
+    ):
         first = True
         device = torch.device("cuda" if enc_state.is_cuda else "cpu")
         token_list = []  # len=beam_width
         probability = np.zeros((beam_width,), dtype=float)
         token_child_list = []  # len=beam_width**2
         probability_child = np.zeros((beam_width, beam_width), dtype=float)
+
+        decoder = self.get_decoder()
+        joiner = self.get_joiner()
+
         # [NOTE]: beam_width 만큼의 list를 만든다음 그 리스트에 값들을 차례대로 넣어가며 예측한다.
         for i in range(beam_width):
             token_list.append([0])
@@ -933,6 +957,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 for token_index in range(len(token_list)):
                     token = torch.tensor([token_list[token_index]], dtype=torch.long).to(device)
                     dec_state = self._label_encoder(token)
+
                     dec_state = dec_state.last_hidden_state[:, -1, :]
 
                     joint_outputs = self._joint_network(enc_state[t].view(-1), dec_state.view(-1))

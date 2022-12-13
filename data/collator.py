@@ -16,6 +16,7 @@ class TransducerCollator:
         stack=None,
         stride=None,
         extractor: SequenceFeatureExtractor = None,
+        blank_id=0,
     ) -> None:
         """DataLoader로 부터 건내받은 불규칙한 길이의 데이터를 일정한 길이오 만든 뒤 model에 건내주는 역할을 합니다.
 
@@ -40,6 +41,7 @@ class TransducerCollator:
         self.stride = stride
         self.max_length = max_length
         self.extractor = extractor
+        self.blank_id = blank_id
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         feature_select: str = lambda key: [feature[key] for feature in features]
@@ -48,7 +50,7 @@ class TransducerCollator:
 
         input_values = self.extractor.compress_features(input_values)
         input_values = [{"input_features": features} for features in input_values]
-        labels = [{"input_values": np.insert(label, 0, 0)[:512]} for label in labels]
+        labels = [{"input_values": np.insert(label, 0, self.blank_id)[:512]} for label in labels]
 
         batch = self.extractor.pad(
             input_values,

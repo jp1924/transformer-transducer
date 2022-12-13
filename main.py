@@ -75,6 +75,7 @@ def main(parser: HfArgumentParser) -> None:
         train_args.mel_stack,
         train_args.window_stride,
         extractor=extractor,
+        blank_id=config.blank_id,
     )
     callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
 

@@ -15,7 +15,7 @@ from transformers.generation_logits_process import LogitsProcessorList
 from transformers.generation_stopping_criteria import StoppingCriteriaList, validate_stopping_criteria
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput
-
+from transformers.generation_beam_search import BeamScorer
 from .config import TransformerTransducerConfig
 
 
@@ -358,10 +358,12 @@ class TransducerEncoderLayer(nn.Module):
         return hidden_states
 
 
-class LabelEncoder(nn.Module):
+class TransducerDecoder(TransducerPretrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
-        super(LabelEncoder, self).__init__()
+        super(TransducerEncoder).__init__()
         self.config = config
+        self.is_decoder = True
+
         if True:
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=config.hidden_size,
@@ -418,9 +420,9 @@ class LabelEncoder(nn.Module):
         return EncoderOutput(hidden_state)
 
 
-class AudioEncoder(nn.Module):
+class TransducerEncoder(TransducerPretrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
-        super(AudioEncoder, self).__init__()
+        super(TransducerDecoder).__init__()
         self.config = config
         # self.position_embedding = PositionalEncoding(config.hidden_size)
         self.mask_type = "diagonal"
@@ -450,6 +452,20 @@ class AudioEncoder(nn.Module):
 
             encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.audio_layers)]
             self.layers = nn.ModuleList(encoder_layers)
+
+    def _prepare_encoder_attention_mask(self, attention_mask, input_shape) -> torch.Tensor:
+        if len(input_shape) == 3:
+            return attention_mask
+
+        mask_type = self.config.mask_type
+        masking_func = MASK_STRATEGY[mask_type]
+
+        if self.config.mask_type == "":
+            pass
+        chunk_attention_mask = chunk_attention_mask.to(dtype)
+        chunk_attention_mask = chunk_attention_mask[:, None, :, :]
+
+        return encoder_attention_mask
 
     def forward(
         self,
@@ -488,7 +504,7 @@ class AudioEncoder(nn.Module):
 
         return EncoderOutput(hidden_state)
 
-    def create_chunk_attention_mask(
+    def _create_chunk_attention_mask(
         self,
         attention_mask: torch.Tensor,
         input_shape: Tuple[int],
@@ -520,12 +536,10 @@ class AudioEncoder(nn.Module):
             chunk_mask[mask_idx:mask_y_pos, mask_idx:mask_x_pos] = mask
 
         chunk_attention_mask = torch.stack([chunk_mask for _ in range(batch_size)])
-        chunk_attention_mask = chunk_attention_mask.to(dtype)
-        chunk_attention_mask = chunk_attention_mask[:, None, :, :]
 
         return chunk_attention_mask
 
-    def create_diag_attention_mask(
+    def _create_diag_attention_mask(
         self,
         attention_mask: torch.Tensor,
         input_shape: Tuple[int],
@@ -542,8 +556,6 @@ class AudioEncoder(nn.Module):
         diag_mask = left_mask + right_mask
 
         diag_attention_mask = torch.stack([diag_mask for _ in range(batch_size)])
-        diag_attention_mask = diag_attention_mask.to(dtype)
-        diag_attention_mask = diag_attention_mask[:, None, :, :]
 
         # [TODO]: 나중에 huggingface encoder 사용할 때 제거할 것!!!
         return diag_attention_mask == 0
@@ -566,8 +578,8 @@ class JointNetwork(nn.Module):
     ) -> torch.Tensor:
         """
         논문에서
-        Joint = Linear(AudioEncoder_ti(X)) +
-                Linear(LabelEncoder(Labels(z_1:(i-1))))
+        Joint = Linear(TransducerDecoder_ti(X)) +
+                Linear(TransducerEncoder(Labels(z_1:(i-1))))
         와 같이 적혀져 있기 때문에 Linear로 합치는 부분 까지를 joint network로 지정한다.
         """
         if audio_hiddens.dim() == 3 and label_hiddens.dim() == 3:
@@ -592,8 +604,8 @@ class JointNetwork(nn.Module):
 class TransducerModel(TransducerPretrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
         super(TransducerPretrainedModel, self).__init__(config)
-        self.audio_encoder = AudioEncoder(config)
-        self.label_encoder = LabelEncoder(config)
+        self.audio_encoder = TransducerDecoder(config)
+        self.label_encoder = TransducerEncoder(config)
         self.joint_network = JointNetwork(config)
         self.config = config
         self.mask_type = "diagonal"
@@ -778,6 +790,8 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
             output_hidden_states,
             return_dict,
         )
+        self.test_beam_search(transducer_outputs.audio_last_hidden_state[0])
+
         logits = transducer_outputs.logits
         log_prob = self.log_softmax(logits)
 
@@ -859,7 +873,6 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
 
         encoder_state = encoder_outputs.last_hidden_state
-
         blank_id = self.config.blank_id
 
         decoder = self.get_decoder()
@@ -899,75 +912,59 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
 
         return torch.stack(result_list)[:, 1:]
 
-    def beam_search(
-        self,
-        enc_state,
-        lengths,
-        beam_width=5,
+    def test_beam_search(self, encoder_state) -> None:
+        beam_width = 5
+        decoder = self.get_decoder()
+        joiner = self.get_joiner()
+        lengths = encoder_state.shape[0]
 
-        input_ids: torch.LongTensor,
-        beam_scorer: BeamScorer,
-        logits_processor: Optional[LogitsProcessorList] = None,
-        stopping_criteria: Optional[StoppingCriteriaList] = None,
-        max_length: Optional[int] = None,
-        pad_token_id: Optional[int] = None,
-        eos_token_id: Optional[int] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        output_scores: Optional[bool] = None,
-        return_dict_in_generate: Optional[bool] = None,
-        synced_gpus: Optional[bool] = False,
-        **model_kwargs,
-    ):
         first = True
-        device = torch.device("cuda" if enc_state.is_cuda else "cpu")
+        device = torch.device("cuda" if encoder_state.is_cuda else "cpu")
+
         token_list = []  # len=beam_width
         probability = np.zeros((beam_width,), dtype=float)
         token_child_list = []  # len=beam_width**2
         probability_child = np.zeros((beam_width, beam_width), dtype=float)
-
-        decoder = self.get_decoder()
-        joiner = self.get_joiner()
 
         # [NOTE]: beam_width 만큼의 list를 만든다음 그 리스트에 값들을 차례대로 넣어가며 예측한다.
         for i in range(beam_width):
             token_list.append([0])
         for i in range(beam_width):
             token_child_list.append([])
-            for _ in range(beam_width):
+            for j in range(beam_width):
                 token_child_list[i].append([0])
+
+        # 1 배치 단위의 데이터 들어와야 함
         for t in range(lengths):
-
             max_index = probability.argmax()  # 첫 시작에는 0이 출력됨
-            token = torch.tensor([token_list[max_index]], dtype=torch.long).to(device)
-            # todo：标签也增加mask？
-            # token_mask = look_ahead_mask(token)[:, :, None]
-            dec_state = self._label_encoder(token)
-            dec_state = dec_state.last_hidden_state[:, -1, :]
-            joint_outputs = self._joint_network(enc_state[t].view(-1), dec_state.view(-1))
-            logits = joint_outputs.hidden_state
+            token = torch.tensor([token_list[max_index]], dtype=torch.long).to(device)  # max_index를 왜 출력하는지 이해안됨
 
-            # out = F.softmax(logits, dim=0).detach()
-            out = logits.softmax(dim=-1)
+            decoder_outputs = decoder(token)
+            decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+
+            joiner_outputs = joiner(encoder_state[t].view(-1), decoder_state.view(-1))
+            logits = joiner_outputs.hidden_state
+            out = logits.softmax(dim=0).detach()
+
             pred_max = torch.argmax(out, dim=0)
             pred_max = int(pred_max.item())
-            # 여기까지는 일반적인 transducer inference와 동일함
 
             if pred_max != 0:
                 for token_index in range(len(token_list)):
                     token = torch.tensor([token_list[token_index]], dtype=torch.long).to(device)
-                    dec_state = self._label_encoder(token)
 
-                    dec_state = dec_state.last_hidden_state[:, -1, :]
+                    decoder_outputs = decoder(token)
+                    decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
 
-                    joint_outputs = self._joint_network(enc_state[t].view(-1), dec_state.view(-1))
-                    logits = joint_outputs.hidden_state
-                    # out = F.softmax(logits, dim=0).detach()  # 1차원 배열
-                    out = logits.softmax(dim=-1)
+                    joiner_outputs = joiner(encoder_state[t].view(-1), decoder_state.view(-1))
+                    logits = joiner_outputs.hidden_state
+                    out = logits.softmax(dim=0).detach()  # 1차원 배
+
                     values, indices = torch.topk(out, k=beam_width + 1, dim=0)
                     values = values.tolist()
                     indices = indices.tolist()
-                    if 0 in indices:
+
+                    if 0 in indices:  # 첫 시작 떄 token에 있는 blank 값을 삭제함.
                         zero_index = indices.index(0)
                         indices.pop(zero_index)
                         values.pop(zero_index)
@@ -982,7 +979,6 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                         for i in range(len(indices)):
                             token_child_list[token_index][i].append(indices[i])
                             probability_child[token_index] = probability[token_index] + np.log(values)
-                    # print(token.tolist(), np.log(values), indices)
                 if first:
                     first = False
                     for i in range(beam_width):
@@ -994,6 +990,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                         index = top_k_index[i]
                         probability[i] = copy.deepcopy(probability_child[index // beam_width, index % beam_width])
                         token_list[i] = copy.deepcopy(token_child_list[index // beam_width][index % beam_width])
+
         max_index = probability.argmax()
         token_list = token_list[max_index]
         return token_list[1:]

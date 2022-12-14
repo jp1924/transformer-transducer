@@ -129,9 +129,9 @@ class EncoderOutput(ModelOutput):
 
 @dataclass
 class JoinerOutput(ModelOutput):
-    logtis: torch.Tensor
-    audio_hidden: torch.Tensor
-    label_hidden: torch.Tensor
+    logits: torch.Tensor
+    audio_hidden: torch.Tensor = None
+    label_hidden: torch.Tensor = None
 
 
 @dataclass
@@ -415,8 +415,8 @@ class TransducerDecoder(TransducerPretrainedModel):
             encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.label_layers)]
             self.layers = nn.ModuleList(encoder_layers)
 
-        self.position_ids = torch.arange(config.position_embed_size, device=self.device)
-        self.position_embeddings = nn.Embedding(config.position_embed_size, config.hidden_size)
+        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
+        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.word_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
 
     def _prepare_decoder_attention_mask(
@@ -455,22 +455,30 @@ class TransducerDecoder(TransducerPretrainedModel):
 
         # [XXX]: 이 부분은 나중에 확인 필요
         #         코드가 너무 길어서 나중에 수정될 수 있음
-        label_shape = labels.shape
-        attention_mask = self._prepare_decoder_attention_mask(attention_mask, label_shape) if self.training else None
 
         # [XXX]: 나중에 따로 모듈화 해야할 수도 있음
-        position_ids = self.position_ids[:input_len]
+        position_ids = self.position_ids[:, :input_len]
         position_embed = self.position_embeddings(position_ids)
         word_embed = self.word_embedding(labels)
 
         hidden_state = word_embed + position_embed
 
+        label_shape = labels.shape
+        attention_mask = (
+            self._prepare_decoder_attention_mask(
+                attention_mask,
+                label_shape,
+                position_embed,
+            )
+            if self.training
+            else None
+        )
+
         if True:
             if attention_mask is not None:
-                attention_mask = attention_mask.squeeze(1).bool()
+                attention_mask = attention_mask.squeeze(1)
                 attention_mask = attention_mask.repeat(self.head_size, 1, 1)
-                attention_mask = ~attention_mask
-            hidden_state = self.encoder(hidden_state, attention_mask)
+            hidden_state = self.encoder(hidden_state, attention_mask.bool())
         else:
             for layer in self.layers:
                 hidden_state = layer(hidden_state, attention_mask)
@@ -485,6 +493,11 @@ class TransducerEncoder(TransducerPretrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
         super(TransducerPretrainedModel, self).__init__(config)
         self.config = config
+        self.attention_type = self.config.attention_type
+
+        self.left_context = None
+        self.right_context = None
+        self.chunk = None
 
         if True:
             encoder_layer = nn.TransformerEncoderLayer(
@@ -500,7 +513,6 @@ class TransducerEncoder(TransducerPretrainedModel):
             )
             self.encoder = nn.TransformerEncoder(encoder_layer, config.audio_layers)
             self.head_size = config.num_attention_heads
-
         else:
             self.test_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
             self.test_ids = torch.arange(config.position_embed_size)
@@ -509,14 +521,15 @@ class TransducerEncoder(TransducerPretrainedModel):
 
             encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.audio_layers)]
             self.layers = nn.ModuleList(encoder_layers)
-        self.position_ids = torch.arange(512, device=self.device)
-        self.position_embeddings = nn.Embedding(512, config.hidden_size)
+        # [TODO]: absolute, relative positional embedding 구현하기
+        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
+        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
 
     def _prepare_encoder_attention_mask(
         self,
         attention_mask: torch.Tensor,
         input_shape: Tuple[int],
-        dtype: Optional[torch.float] = None,
+        dtype: torch.float = None,
     ) -> torch.Tensor:
         # [NOTE]: opt model의 _prepare_decoder_attention_mask 에서 따왔다.
         #         huggingface의 encoder, deocder형식을 가진 seq2seq모델의 경우 model이 아닌 decoder에 casual mask를 생성하는
@@ -526,18 +539,17 @@ class TransducerEncoder(TransducerPretrainedModel):
         if dtype is None:
             dtype = self.dtype
 
-        if len(input_shape) == 3:
+        if attention_mask.dim() == 3:
             extended_attention_mask = attention_mask[:, None, :, :]
             return extended_attention_mask.to(dtype)
 
-        mask_type = self.config.mask_type
-        if mask_type == "chunk-wise":
+        if self.attention_type == "chunk-wise":
             extended_attention_mask = self._create_chunk_attention_mask(
                 attention_mask,
                 input_shape,
                 chunk_size=3,
             )
-        elif mask_type == "diagonal":
+        elif self.attention_type == "diagonal":
             extended_attention_mask = self._create_diag_attention_mask(
                 attention_mask,
                 input_shape,
@@ -545,11 +557,12 @@ class TransducerEncoder(TransducerPretrainedModel):
                 right_context=3,
             )
             # [TODO]: 나중에 huggingface encoder 사용할 때 제거할 것!!!
-            extended_attention_mask = extended_attention_mask == 0
-        elif mask_type == "full":
-            extended_attention_mask = attention_mask[:, None, :]
+            # extended_attention_mask = extended_attention_mask == 0
+        elif self.attention_type == "original_full":  # from BigBird Model
             # extended_attention_mask[:, None, :, :] 여기에서 차원이 추가되서 4차원이 됨
+            extended_attention_mask = attention_mask[:, None, :]
         else:
+            # [TODO]: 나중에 영어로 작성할 것
             raise ValueError("diagonal, chunk-wise, full 중 하나를 선택해 주세요!")
 
         extended_attention_mask = extended_attention_mask[:, None, :, :]
@@ -623,7 +636,8 @@ class TransducerEncoder(TransducerPretrainedModel):
 
         if True:
             time_seq = input_features.shape[1]
-            position_vector = self.position_embeddings(self.position_ids[:time_seq])
+            position_ids = self.position_ids[:, :time_seq]
+            position_vector = self.position_embeddings(position_ids)
             hidden_state = input_features + position_vector
 
             if attention_mask is not None:
@@ -670,17 +684,17 @@ class TransducerJoiner(nn.Module):
         audio_hiddens = self.audio_linear(audio_hiddens)
         label_hiddens = self.label_linear(label_hiddens)
 
-        concat_hiddens = audio_hiddens + label_hiddens
-        concat_hiddens = self.tanh(concat_hiddens)
-        concat_hiddens = self.dense(concat_hiddens)
+        joint_hiddens = audio_hiddens + label_hiddens
+        joint_hiddens = self.tanh(joint_hiddens)
+        joint_hiddens = self.dense(joint_hiddens)
 
         if not return_dict:
-            return (audio_hiddens, label_hiddens, concat_hiddens)
+            return (audio_hiddens, label_hiddens, joint_hiddens)
 
         return JoinerOutput(
-            logits=concat_hiddens,
-            label_hidden=label_hiddens,
+            logits=joint_hiddens,
             audio_hidden=audio_hiddens,
+            label_hidden=label_hiddens,
         )
 
 
@@ -737,7 +751,7 @@ class TransducerModel(TransducerPretrainedModel):
         label_hiddens = decoder_outputs.last_hidden_state
 
         joiner_outputs = self.joiner(audio_hiddens, label_hiddens, return_dict)
-        hidden_states = joiner_outputs.logtis
+        hidden_states = joiner_outputs.logits
 
         if not return_dict:
             return (
@@ -766,8 +780,6 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         self.reduction = config.loss_reduction
         self.blank_id = config.blank_id
         self.loss_clamp = config.clamp
-
-        self.dtype = torch.int32
 
         self.post_init()
 
@@ -815,18 +827,22 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         log_prob = self.log_softmax(logits)
 
         # [NOTE]: label에 붙어져 있는 blank token 제거
-        non_blank_labels = labels[1:]
-
+        non_blank_labels = labels[:, 1:]
         # [XXX]: torchaudio의 rnn-t loss는 int32의 정수형만 받아들임
         #        이 if문은 부분은 나중에 수정될 수 있음
-        feature_lengths = feature_lengths if feature_lengths else attention_mask.sum(-1, self.dtype)
-        label_lengths = label_lengths if label_lengths else decoder_attention_mask.sum(-1, self.dtype)
+        feature_lengths = feature_lengths if feature_lengths else attention_mask.sum(-1)
+        label_lengths = label_lengths if label_lengths else decoder_attention_mask.sum(-1)
+        label_lengths = label_lengths - 1
+
+        non_blank_labels = non_blank_labels.to(torch.int32)
+        feature_lengths = feature_lengths.to(torch.int32)
+        label_lengths = label_lengths.to(torch.int32)
 
         loss = rnnt_loss(
             logits=log_prob,
             targets=non_blank_labels,
-            logit_lengths=feature_lengths,
             target_lengths=label_lengths,
+            logit_lengths=feature_lengths,
             blank=self.blank_id,
             clamp=self.loss_clamp,
             reduction=self.reduction,
@@ -840,7 +856,6 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
 
         if not return_dict:
             return None
-
         return RNNTBaseOutput(loss=loss, logits=logits)
 
     def prepare_inputs_for_generation(

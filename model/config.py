@@ -20,7 +20,7 @@ class TransformerTransducerConfig(PretrainedConfig):
         # self.attn_norm_eps = 0.00001
         self.hidden_dropout = 0.0002
 
-        self.position_embed_size = 512
+        self.max_position_embeddings = 512
         self.vocab_size = vocab_size
 
         self.position_embedding_type = "absolute"
@@ -45,7 +45,7 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.length_penalty = 1.0
 
         # for generate
-        self.max_length = 200
+        self.max_length = 512
         self.min_length = 1
         self.do_sample = False
         self.early_stopping = False
@@ -73,3 +73,5 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.begin_suppress_tokens = None
 
         self.decoder_start_token_id = 0
+        self.attention_type = "diagonal"
+        self.clamp = -1

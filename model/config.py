@@ -2,40 +2,63 @@ from transformers import PretrainedConfig
 
 
 class TransformerTransducerConfig(PretrainedConfig):
-    def __init__(self, vocab_size=None) -> None:
-        self.label_layers = 2
-        self.audio_layers = 18
+    def __init__(
+        self,
+        vocab_size=None,
+        initializer_range=0.02,
+        encoder_layers=18,
+        decoder_layers=2,
+        hidden_size=320,
+        hidden_dropout=0.03,
+        hidden_act="gelu",
+        layer_norm_eps=0.00001,
+        max_position_embeddings=512,
+        position_embedding_type="absolute",
+        intermediate_size=640,
+        activation_dropout=0.03,
+        attention_type="diagonal",
+        attention_dropout=0.03,
+        score_dropout=0.07,
+        num_attention_heads=10,
+        loss_reduction="mean",
+        blank_id=0,
+        clamp=-1,
+        decoder_start_token_id=0,
+        **kwargs
+    ) -> None:
+        super().__init__(**kwargs)
+        self.encoder_layers = encoder_layers
+        self.decoder_layers = decoder_layers
 
-        self.hidden_size = 320
-        self.intermediate_size = 640
-        self.activation_dropout = 0.03
-        self.hidden_dropout = 0.03
-        self.hidden_act = "gelu"
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.activation_dropout = activation_dropout
+        self.hidden_dropout = hidden_dropout
+        self.hidden_act = hidden_act
 
-        self.attention_probs_dropout_prob = 0.03
-        self.score_dropout = 0.07
-        self.num_attention_heads = 10
+        self.attention_dropout = attention_dropout
+        self.score_dropout = score_dropout
+        self.num_attention_heads = num_attention_heads
 
-        self.layer_norm_eps = 0.00001
-        # self.attn_norm_eps = 0.00001
-        self.hidden_dropout = 0.0002
+        self.layer_norm_eps = layer_norm_eps
+        self.hidden_dropout = hidden_dropout
 
-        self.max_position_embeddings = 512
+        self.max_position_embeddings = max_position_embeddings
         self.vocab_size = vocab_size
 
-        self.position_embedding_type = "absolute"
+        self.position_embedding_type = position_embedding_type
 
-        self.loss_reduction = "mean"
-        self.is_decoder = False
-        self.blank_id = 0
-        self.is_audio = False
-        self.mel_size = 80
+        self.loss_reduction = loss_reduction
+        self.blank_id = blank_id
+        self.clamp = clamp
+        self.initializer_range = initializer_range
+
+        # for generate
 
         self.bos_token_id = 1
         self.eos_token_id = 2
         self.pad_token_id = 0
         self.pruned_heads = False
-        self.initializer_range = 0.02
         self.output_attentions = False
         self.output_hidden_states = False
         self.is_encoder_decoder = True
@@ -72,6 +95,5 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.suppress_tokens = None
         self.begin_suppress_tokens = None
 
-        self.decoder_start_token_id = 0
-        self.attention_type = "diagonal"
-        self.clamp = -1
+        self.decoder_start_token_id = decoder_start_token_id
+        self.attention_type = attention_type

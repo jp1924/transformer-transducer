@@ -204,7 +204,7 @@ class TransducerSelfAttention(nn.Module):
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
-        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        self.dropout = nn.Dropout(config.attention_dropout)
         self.position_embedding_type = position_embedding_type or getattr(config, "position_embedding_type", "absolute")
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             self.max_position_embeddings = config.max_position_embeddings
@@ -409,10 +409,10 @@ class TransducerDecoder(TransducerPretrainedModel):
                 device=None,
                 dtype=None,
             )
-            self.encoder = nn.TransformerEncoder(encoder_layer, config.label_layers)
+            self.encoder = nn.TransformerEncoder(encoder_layer, config.decoder_layers)
             self.head_size = config.num_attention_heads
         else:
-            encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.label_layers)]
+            encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
             self.layers = nn.ModuleList(encoder_layers)
 
         self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
@@ -478,7 +478,8 @@ class TransducerDecoder(TransducerPretrainedModel):
             if attention_mask is not None:
                 attention_mask = attention_mask.squeeze(1)
                 attention_mask = attention_mask.repeat(self.head_size, 1, 1)
-            hidden_state = self.encoder(hidden_state, attention_mask.bool())
+                attention_mask = attention_mask.bool()
+            hidden_state = self.encoder(hidden_state, attention_mask)
         else:
             for layer in self.layers:
                 hidden_state = layer(hidden_state, attention_mask)
@@ -511,7 +512,7 @@ class TransducerEncoder(TransducerPretrainedModel):
                 device=None,
                 dtype=None,
             )
-            self.encoder = nn.TransformerEncoder(encoder_layer, config.audio_layers)
+            self.encoder = nn.TransformerEncoder(encoder_layer, config.encoder_layers)
             self.head_size = config.num_attention_heads
         else:
             self.test_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
@@ -519,7 +520,7 @@ class TransducerEncoder(TransducerPretrainedModel):
 
             self.linear = nn.Linear(80, config.hidden_size)
 
-            encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.audio_layers)]
+            encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.encoder_layers)]
             self.layers = nn.ModuleList(encoder_layers)
         # [TODO]: absolute, relative positional embedding 구현하기
         self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
@@ -865,6 +866,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         attention_mask: Optional[torch.Tensor],
         decoder_attention_mask: Optional[torch.Tensor],
     ) -> Dict[str, Any]:
+        # 이 부분은 generate에서 어떻게 동작하는지 확인할 필요가 있음
         return {
             "input_features": input_features,
             "labels": labels,
@@ -988,38 +990,48 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
             decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
 
             joiner_outputs = joiner(encoder_state[t].view(-1), decoder_state.view(-1))
-            logits = joiner_outputs.hidden_state
+            logits = joiner_outputs.logits
             out = logits.softmax(dim=0).detach()
 
             pred_max = torch.argmax(out, dim=0)
             pred_max = int(pred_max.item())
-
-            if pred_max != 0:
+            # 이 윗 부분은 time-index의 blank를 예측하기 위해서 만들어 졌음.
+            # blank 값이 아닌 time index를 만났다면 그 이후부터 beam-search를 진행한다.
+            if pred_max != 0:  # y축, rnn-t loss그림에서의 u에 해당됨
                 for token_index in range(len(token_list)):
+                    # RNN-T의 u(반복횟수를) beam_width만큼 진행시키는 듯
                     token = torch.tensor([token_list[token_index]], dtype=torch.long).to(device)
-
+                    # token_list가 일종의 root-node인건가?
                     decoder_outputs = decoder(token)
-                    decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+                    decoder_state = decoder_outputs.last_hidden_state[:, -1, :]  # last_hidden_state를 얻기 위해서 -1를 하는 듯
 
                     joiner_outputs = joiner(encoder_state[t].view(-1), decoder_state.view(-1))
-                    logits = joiner_outputs.hidden_state
+                    # deepcopy 문제를 피하기 위해서 view를 진행함.
+                    logits = joiner_outputs.logits
                     out = logits.softmax(dim=0).detach()  # 1차원 배
 
-                    values, indices = torch.topk(out, k=beam_width + 1, dim=0)
+                    values, indices = torch.topk(out, k=beam_width + 1, dim=0)  # 아마 1을 추가한 이유는 blank때문인 듯
+                    # topk는 주어진 원소 중에서 k개의 가장 큰 값들을 추출하는 함수, 이떄 큰 값 순으로 정렬된다.
+                    # ex): k=3, [0, 1, 2, 3, 4, 5] > [5, 4, 3]
+                    # 위와 같은 결과가 나오기 때문에 if first문 에서 모든 행에서 첫 열의 값만 가져간다.
+
                     values = values.tolist()
                     indices = indices.tolist()
 
                     if 0 in indices:  # 첫 시작 떄 token에 있는 blank 값을 삭제함.
-                        zero_index = indices.index(0)
+                        zero_index = indices.index(0)  # 매개변수로 건낸 값이 잇는 index위치 값을 반환함
+                        # blank값이 하나만 나온다는 확신이 있어서 하나만 제거하나?
+                        # 2개 3개 나올 수 있는거 아닌기?
                         indices.pop(zero_index)
                         values.pop(zero_index)
                     else:
                         indices.pop(-1)
                         values.pop(-1)
+                        # topk시 blank값을 고려해 beam_width + 1을 하기 때문에 opk 6개의 값이 나오게 된다.
                     if first:
                         for i in range(len(indices)):
                             token_child_list[i][token_index].append(indices[i])
-                            probability_child[:, token_index] = np.log(values)
+                            probability_child[:, token_index] = np.log(values)  # 최초로 log_prob을 추가시키는 곳
                     else:
                         for i in range(len(indices)):
                             token_child_list[token_index][i].append(indices[i])
@@ -1027,10 +1039,10 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 if first:
                     first = False
                     for i in range(beam_width):
-                        token_list[i] = copy.deepcopy(token_child_list[i][0])
+                        token_list[i] = copy.deepcopy(token_child_list[i][0])  # 첫 루트 노드에다가 누적 화률 값을 입력하는 곳
                         probability[i] = copy.deepcopy(probability_child[i, 0])
                 else:
-                    top_k_index = heapq.nlargest(beam_width, range(beam_width**2), probability_child.take)
+                    top_k_index = heapq.nlargest(beam_width, range(beam_width**2), key=probability_child.take)
                     for i in range(len(top_k_index)):
                         index = top_k_index[i]
                         probability[i] = copy.deepcopy(probability_child[index // beam_width, index % beam_width])

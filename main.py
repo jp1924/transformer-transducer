@@ -9,80 +9,18 @@ from datasets import Dataset
 from evaluate import load
 from model import TransformerTranducerForRNNT, TransformerTransducerConfig
 from setproctitle import setproctitle
-from transformers import HfArgumentParser, Trainer, Wav2Vec2Tokenizer, set_seed
+from transformers import HfArgumentParser, Seq2SeqTrainer, Wav2Vec2Tokenizer, set_seed, Trainer
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
 from utils import DataArguments, ModelArguments, TransducerTrainArgument
-
-
-def concat_frame(features, left_context_width, right_context_width):
-    bsz = len(features)
-
-    stack = []
-    for b in range(bsz):
-        time_steps, features_dim = features[b].shape
-        concated_features = np.zeros(
-            shape=[time_steps, features_dim * (1 + left_context_width + right_context_width)], dtype=features[b].dtype
-        )
-        # middle part is just the uttarnce
-        concated_features[:, left_context_width * features_dim : (left_context_width + 1) * features_dim] = features[b]
-
-        for i in range(left_context_width):
-            # add left context
-            concated_features[
-                i + 1 : time_steps,
-                (left_context_width - i - 1) * features_dim : (left_context_width - i) * features_dim,
-            ] = features[b][0 : time_steps - i - 1, :]
-
-        for i in range(right_context_width):
-            # add right context
-            concated_features[
-                0 : time_steps - i - 1,
-                (right_context_width + i + 1) * features_dim : (right_context_width + i + 2) * features_dim,
-            ] = features[b][i + 1 : time_steps, :]
-
-        concated_features = np.delete(concated_features, range(left_context_width), axis=0)
-        concated_features = np.delete(
-            concated_features,
-            [(x + concated_features.shape[0] - right_context_width) for x in range(right_context_width)],
-            axis=0,
-        )
-        stack.append(concated_features)
-    return stack
+import matplotlib.pyplot as plt
+from torch.profiler import profile, record_function, ProfilerActivity
 
 
 def main(parser: HfArgumentParser) -> None:
     train_args, data_args, model_args, _ = parser.parse_args_into_dataclasses(return_remaining_strings=True)
     setproctitle(train_args.run_name)
     set_seed(train_args.seed)
-
-    def mel_preprocess(dataset: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        label은 이미 encoding 되었다고 가정함.
-        """
-        mel_feature = dataset["input_values"]
-        time_steps, features_dim = mel_feature.shape
-
-        # [NOTE]: for explicitness
-        max_length = train_args.mel_max_length
-        stack = train_args.mel_stack
-        stride = train_args.window_stride
-
-        mel_store = list()
-        for step in range(stack):
-            indices = [step + idx for idx in range(0, (time_steps - step), stride)]
-            features = mel_feature[indices[:max_length]]
-            # [TODO]: 이 부분은 extractor의 pad 기능이 하는게 맞지만 임시로 이렇게 만든다.
-            pad_width = ((0, max_length - features.shape[0]), (0, 0))
-            features = np.pad(features, pad_width)
-
-            mel_store.append(features)
-
-        padded_feature = np.concatenate(mel_store, axis=1)
-        padded_feature = padded_feature.transpose()
-
-        dataset["input_values"] = padded_feature
-        return dataset
 
     def metrics(evaluation_result: EvalPrediction) -> Dict[str, float]:
         """_metrics_
@@ -112,19 +50,6 @@ def main(parser: HfArgumentParser) -> None:
 
         return result
 
-    def logits_for_metrics(logits: Union[Tuple, torch.Tensor], _) -> torch.Tensor:
-        """_logits_for_metrics_
-            Trainer.evaluation_loop에서 사용되는 함수로 logits를 argmax를 이용해
-            축소 시켜 공간복잡도를 줄이기 위한 목적으로 작성되었습니다.
-        Args:
-            logits (Union[Tuple, torch.Tensor]): Model을 거쳐서 나온 3차원 (bch, sqr, hdn)의 logits을 전달받습니다.
-            _ : label이 입력되는 부분이지만 사용되지 않기에 하이픈처리 했습니다.
-        Returns:
-            torch.Tensor: 차원을 축소한 뒤의 torch.Tensor를 반환합니다.
-        """
-        return_logits = logits.argmax(dim=-1)
-        return return_logits
-
     tokenizer = Wav2Vec2Tokenizer.from_pretrained("test42/kerberus2", use_auth_token=True)
     config = TransformerTransducerConfig(tokenizer.vocab_size)
     model = TransformerTranducerForRNNT(config)
@@ -150,19 +75,19 @@ def main(parser: HfArgumentParser) -> None:
         train_args.mel_stack,
         train_args.window_stride,
         extractor=extractor,
+        blank_id=config.blank_id,
     )
     callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
 
-    trainer = Trainer(
+    trainer = Seq2SeqTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_data,
         eval_dataset=valid_data,
         args=train_args,
-        # compute_metrics=metrics,
+        compute_metrics=metrics,
         data_collator=collator,
         callbacks=callbacks,
-        preprocess_logits_for_metrics=logits_for_metrics,
     )
     if train_args.do_train:
         train(trainer, train_args)
@@ -172,7 +97,7 @@ def main(parser: HfArgumentParser) -> None:
         predict(trainer, test_data)
 
 
-def train(trainer: Trainer, args: Namespace) -> None:
+def train(trainer: Seq2SeqTrainer, args: Namespace) -> None:
     """_train_
         Trainer를 전달받아 Trainer.train을 실행시키는 함수입니다.
         학습이 끝난 이후 학습 결과 그리고 최종 모델을 저장하는 기능도 합니다.
@@ -184,7 +109,9 @@ def train(trainer: Trainer, args: Namespace) -> None:
         trainer (Seq2SeqTrainer): Huggingface의 torch Seq2SeqTrainer를 전달받습니다.
         args (Namespace): Seq2SeqTrainingArgument를 전달받습니다.
     """
+    # with profile(activities=[ProfilerActivity.CUDA], profile_memory=True, use_cuda=True) as prof:
     outputs = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    # prof.export_chrome_trace("trace.json")
     if is_main_process(args.local_rank):
         model_name = trainer.model.name_or_path
         save_path = os.path.join(args.output_dir, model_name)
@@ -200,7 +127,7 @@ def train(trainer: Trainer, args: Namespace) -> None:
         trainer.save_model(save_path)
 
 
-def eval(trainer: Trainer, eval_data: Dataset, args: Namespace) -> None:
+def eval(trainer: Seq2SeqTrainer, eval_data: Dataset, args: Namespace) -> None:
     """_eval_
         Trainer를 전달받아 Trainer.eval을 실행시키는 함수입니다.
     Args:
@@ -213,7 +140,7 @@ def eval(trainer: Trainer, eval_data: Dataset, args: Namespace) -> None:
         trainer.save_metrics("eval", metrics)
 
 
-def predict(trainer: Trainer, test_data: Dataset) -> None:
+def predict(trainer: Seq2SeqTrainer, test_data: Dataset) -> None:
     """_predict_
         Trainer를 전달받아 Trainer.predict을 실행시키는 함수입니다.
         이때 Seq2SeqTrainer의 Predict이 실행되며 model.generator를 실행시키기 위해

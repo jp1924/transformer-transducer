@@ -16,6 +16,12 @@ from transformers.generation_stopping_criteria import StoppingCriteriaList, vali
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput
 from .config import TransformerTransducerConfig
+import torch.distributed as dist
+from transformers.utils import logging
+import random
+
+
+logger = logging.get_logger(__name__)
 
 
 def _make_causal_mask(input_ids_shape: torch.Size, dtype: torch.dtype, past_key_values_length: int = 0):
@@ -159,6 +165,9 @@ class RNNTBaseOutput(ModelOutput):
     label_attentions: torch.Tensor = None
 
 
+# =====================================================
+
+
 class TransducerPretrainedModel(PreTrainedModel):
     config_class = TransformerTransducerConfig
     base_model_prefix = "transformertransducer"
@@ -188,7 +197,7 @@ class TransducerPretrainedModel(PreTrainedModel):
 
 
 class TransducerSelfAttention(nn.Module):
-    def __init__(self, config: PretrainedConfig, position_embedding_type=None):
+    def __init__(self, config, position_embedding_type=None):
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
@@ -254,6 +263,7 @@ class TransducerSelfAttention(nn.Module):
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
+        use_cache = past_key_value is not None
         if self.is_decoder:
             # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
             # Further calls to cross_attention layer can then reuse all cross-attention
@@ -268,10 +278,14 @@ class TransducerSelfAttention(nn.Module):
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
 
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
-            seq_length = hidden_states.size()[1]
-            position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
-            position_ids_r = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
+            query_length, key_length = query_layer.shape[2], key_layer.shape[2]
+            if use_cache:
+                position_ids_l = torch.tensor(key_length - 1, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+            else:
+                position_ids_l = torch.arange(query_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+            position_ids_r = torch.arange(key_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
             distance = position_ids_l - position_ids_r
+
             positional_embedding = self.distance_embedding(distance + self.max_position_embeddings - 1)
             positional_embedding = positional_embedding.to(dtype=query_layer.dtype)  # fp16 compatibility
 
@@ -305,11 +319,9 @@ class TransducerSelfAttention(nn.Module):
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(new_context_layer_shape)
 
-        outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
+        attention_probs = attention_probs if output_attentions else None
 
-        if self.is_decoder:
-            outputs = outputs + (past_key_value,)
-        return outputs
+        return context_layer, attention_probs
 
 
 class TransducerFeedForward(nn.Module):
@@ -361,7 +373,7 @@ class TransducerEncoderLayer(nn.Module):
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
 
         attention_residual = hidden_states
-        hidden_states = self.attention(
+        hidden_states, attn_weights = self.attention(
             hidden_states,
             attention_mask,
             head_mask=head_mask,
@@ -373,19 +385,17 @@ class TransducerEncoderLayer(nn.Module):
         hidden_states = self.dropout(hidden_states[0])
         hidden_states = attention_residual + hidden_states
         hidden_states = self.layer_norm(hidden_states)
-        """
-            [NOTE]: 이 부분은 한번 확인할 것
-                    일단은 변수를 줄이기 위해 wav2vec2의 FFN을 따라함.
-            ffn_residual = hidden_states
-            hidden_states = ffn_residual + self.feed_forward(hidden_states)
-            hidden_states = self.final_layer_norm(hidden_states)
-        """
 
         hidden_states = self.layer_norm(hidden_states)
         hidden_states = hidden_states + self.feed_forward(hidden_states)
         hidden_states = self.final_layer_norm(hidden_states)
 
-        return hidden_states
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (attn_weights,)
+
+        return outputs
 
 
 # ======================================================
@@ -412,18 +422,22 @@ class TransducerDecoder(TransducerPretrainedModel):
             self.encoder = nn.TransformerEncoder(encoder_layer, config.decoder_layers)
             self.head_size = config.num_attention_heads
         else:
-            encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
-            self.layers = nn.ModuleList(encoder_layers)
-
+            decoder_layers = [TransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
+            self.layers = nn.ModuleList(decoder_layers)
+            self.layerdrop = config.encoder_layerdrop
         self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.word_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
 
+        self.gradient_checkpointing = False
+        # Initialize weights and apply final processing
+        self.post_init()
+
     def _prepare_decoder_attention_mask(
         self,
-        attention_mask: torch.Tensor,
         input_shape: Tuple[int],
         inputs_embeds: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
         past_key_values_length: int = 0,
     ):
         # create causal mask
@@ -450,6 +464,8 @@ class TransducerDecoder(TransducerPretrainedModel):
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
+        head_mask: Optional[torch.Tensor] = None,
+        use_cache: Optional[bool] = None,
     ) -> Union[EncoderOutput, Tuple[Any]]:
         input_len = labels.shape[1] if labels.dim() == 2 else labels.shape[0]
 
@@ -461,17 +477,13 @@ class TransducerDecoder(TransducerPretrainedModel):
         position_embed = self.position_embeddings(position_ids)
         word_embed = self.word_embedding(labels)
 
-        hidden_state = word_embed + position_embed
+        hidden_states = word_embed + position_embed
 
         label_shape = labels.shape
-        attention_mask = (
-            self._prepare_decoder_attention_mask(
-                attention_mask,
-                label_shape,
-                position_embed,
-            )
-            if self.training
-            else None
+        attention_mask = self._prepare_decoder_attention_mask(
+            attention_mask=attention_mask,
+            input_shape=label_shape,
+            inputs_embeds=position_embed,
         )
 
         if True:
@@ -479,15 +491,64 @@ class TransducerDecoder(TransducerPretrainedModel):
                 attention_mask = attention_mask.squeeze(1)
                 attention_mask = attention_mask.repeat(self.head_size, 1, 1)
                 attention_mask = attention_mask.bool()
-            hidden_state = self.encoder(hidden_state, attention_mask)
+            hidden_states = self.encoder(hidden_states, attention_mask)
+            all_attentions = None
+            encoder_states = None
         else:
-            for layer in self.layers:
-                hidden_state = layer(hidden_state, attention_mask)
+            # decoder layers
+            all_hidden_states = () if output_hidden_states else None
+            all_self_attns = () if output_attentions else None
+            next_decoder_cache = () if use_cache else None
+
+            encoder_states = () if output_hidden_states else None
+            all_attentions = () if output_attentions else None
+
+            for idx, encoder_layer in enumerate(self.layers):
+                if output_hidden_states:
+                    encoder_states = encoder_states + (hidden_states,)
+                # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+                dropout_probability = random.uniform(0, 1)
+                if self.training and (dropout_probability < self.layerdrop):  # skip the layer
+                    layer_outputs = (None, None)
+                else:
+                    if self.gradient_checkpointing and self.training:
+
+                        def create_custom_forward(module):
+                            def custom_forward(*inputs):
+                                return module(*inputs, output_attentions)
+
+                            return custom_forward
+
+                        layer_outputs = torch.utils.checkpoint.checkpoint(
+                            create_custom_forward(encoder_layer),
+                            hidden_states,
+                            attention_mask,
+                            (head_mask[idx] if head_mask is not None else None),
+                        )
+                    else:
+                        layer_outputs = encoder_layer(
+                            hidden_states,
+                            attention_mask,
+                            head_mask=(head_mask[idx] if head_mask is not None else None),
+                            output_attentions=output_attentions,
+                        )
+
+                    hidden_states = layer_outputs[0]
+
+                if output_attentions:
+                    all_attentions = all_attentions + (layer_outputs[1],)
+
+        if output_hidden_states:
+            encoder_states = encoder_states + (hidden_states,)
 
         if not return_dict:
-            return None
+            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
 
-        return EncoderOutput(hidden_state)
+        return EncoderOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=encoder_states,
+            attentions=all_attentions,
+        )
 
 
 class TransducerEncoder(TransducerPretrainedModel):
@@ -515,10 +576,6 @@ class TransducerEncoder(TransducerPretrainedModel):
             self.encoder = nn.TransformerEncoder(encoder_layer, config.encoder_layers)
             self.head_size = config.num_attention_heads
         else:
-            self.test_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
-            self.test_ids = torch.arange(config.position_embed_size)
-
-            self.linear = nn.Linear(80, config.hidden_size)
 
             encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.encoder_layers)]
             self.layers = nn.ModuleList(encoder_layers)
@@ -639,7 +696,7 @@ class TransducerEncoder(TransducerPretrainedModel):
             time_seq = input_features.shape[1]
             position_ids = self.position_ids[:, :time_seq]
             position_vector = self.position_embeddings(position_ids)
-            hidden_state = input_features + position_vector
+            hidden_states = input_features + position_vector
 
             if attention_mask is not None:
                 # pytorch transformer를 위해 만든 곳, pytorch transformer는 bsz * head_size임
@@ -648,15 +705,15 @@ class TransducerEncoder(TransducerPretrainedModel):
                 # [NOTE]: if full attention일 경우
                 # attention_mask = attention_mask.repeat(1, attention_mask.shape[2], 1)
 
-            hidden_state = self.encoder(hidden_state, attention_mask.bool())
+            hidden_states = self.encoder(hidden_states, attention_mask.bool())
         else:
             for layer in self.layers:
-                hidden_state = layer(hidden_state, attention_mask)
+                hidden_states = layer(hidden_states, attention_mask)
 
         if not return_dict:
             return None
 
-        return EncoderOutput(hidden_state)
+        return EncoderOutput(last_hidden_state=hidden_states)
 
 
 class TransducerJoiner(nn.Module):
@@ -721,6 +778,8 @@ class TransducerModel(TransducerPretrainedModel):
         self,
         input_features: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        decoder_head_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         decoder_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
@@ -797,6 +856,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         self,
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
         decoder_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
@@ -805,6 +865,9 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         label_lengths: Optional[torch.Tensor] = None,
         feature_lengths: Optional[torch.Tensor] = None,
     ) -> Union[RNNTBaseOutput, Tuple[Any]]:
+
+        # [BUG]: DP에서는 동작할 수 없음. 아마 attention_mask단위로 계산하는 것 때문에 발생하는 문제인 듯 함.
+        #        max_length문제는 나중에 해결할 것
 
         # [NOTE]: attention_mask가 3차원으로 들어와도 정상적으로 작동하도록 고려함
         if attention_mask is not None:
@@ -816,12 +879,13 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 raise ValueError("decoder_attention_mask가 3차원 일 때 무조건 label_length가 입력되어야 합니다!")
 
         transducer_outputs = self.transducer(
-            input_features,
-            labels,
-            attention_mask,
-            decoder_attention_mask,
-            output_attentions,
-            output_hidden_states,
+            input_features=input_features,
+            attention_mask=attention_mask,
+            head_mask=head_mask,
+            labels=labels,
+            decoder_attention_mask=decoder_attention_mask,
+            output_hidden_states=output_hidden_states,
+            output_attentions=output_attentions,
             return_dict=return_dict,
         )
         logits = transducer_outputs.logits
@@ -850,7 +914,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         )
 
         # [TODO]: beamsearch 테스트를 위해 넣어둔 코드, 나중에 삭제할 것!
-        self.test_beam_search(transducer_outputs.audio_last_hidden_state[0])
+        # self.test_beam_search(transducer_outputs.audio_last_hidden_state[0])
         # [NOTE]: transformer-transducer는 메모리를 많이 차지하기 때문에 임시로 empty_cache를 진행함
         #         torch profiler를 이용해 값을 확인할 것
         torch.cuda.empty_cache()
@@ -862,9 +926,9 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
     def prepare_inputs_for_generation(
         self,
         input_features: torch.Tensor,
-        labels: Optional[torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        decoder_attention_mask: Optional[torch.Tensor],
+        labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        decoder_attention_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         # 이 부분은 generate에서 어떻게 동작하는지 확인할 필요가 있음
         return {
@@ -891,6 +955,8 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         **model_kwargs,
     ) -> Union[GreedySearchOutput, torch.LongTensor]:
 
+        # [TODO]: input_features라는 이름은 나중에 바꿀 것
+
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
         stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
         if max_length is not None:
@@ -900,8 +966,6 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 UserWarning,
             )
             stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
-        pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
-        eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
         output_scores = output_scores if output_scores is not None else self.config.output_scores
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -917,16 +981,79 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         cross_attentions = () if (return_dict_in_generate and output_attentions) else None
         decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
 
-        # ====================
+        # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
+        if return_dict_in_generate and self.config.is_encoder_decoder:
+            encoder_attentions = model_kwargs["encoder_outputs"].get("attentions") if output_attentions else None
+            encoder_hidden_states = (
+                model_kwargs["encoder_outputs"].get("hidden_states") if output_hidden_states else None
+            )
 
-        encoder_state = encoder_outputs.last_hidden_state
-        blank_id = self.config.blank_id
+        # keep track of which sequences are already finished
+        unfinished_sequences = input_features.new(input_features.shape[0]).fill_(1)
+
+        this_peer_finished = False  # used by synced_gpus only
+
+        # ====================
 
         decoder = self.get_decoder()
         joiner = self.get_joiner()
 
         decoder_outputs = decoder(input_features)
         decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+        encoder_state = encoder_outputs.last_hidden_state
+
+        feature_length = encoder_state.shape[1]
+        time_idx = 0
+
+        state_iter = enumerate(zip(encoder_state, decoder_state))
+        for batch_idx, (audio_logits, decoder_state) in state_iter:
+            gen_sentence = input_features[batch_idx]
+
+            while True:
+                if time_idx == feature_length and len(gen_sentence) == 512:
+                    break
+
+                current_state = audio_logits[time_idx].view(-1)
+                decoder_state = decoder_state.view(-1)
+
+                joiner_outputs = joiner(current_state, decoder_state)
+                next_token_logits = joiner_outputs.logits
+
+                next_tokens_scores = logits_processor(input_features, next_token_logits)
+                next_tokens_scores = torch.log_softmax(next_tokens_scores, dim=-1)
+
+                next_token = torch.argmax(next_tokens_scores)
+                next_token_score = next_tokens_scores[next_token]
+
+                if next_token == self.blank_id:
+                    time_idx += 1
+                    continue
+
+                if return_dict_in_generate:
+                    if output_scores:
+                        scores += (next_token_score,)
+                    if output_attentions:
+                        decoder_attentions += (
+                            (decoder_outputs.decoder_attentions,)
+                            if self.config.is_encoder_decoder
+                            else (decoder_outputs.attentions,)
+                        )
+                        if self.config.is_encoder_decoder:
+                            cross_attentions += (decoder_outputs.cross_attentions,)
+
+                    if output_hidden_states:
+                        decoder_hidden_states += (
+                            (decoder_outputs.decoder_hidden_states,)
+                            if self.config.is_encoder_decoder
+                            else (decoder_outputs.hidden_states,)
+                        )
+
+                gen_sentence = torch.cat([gen_sentence, next_token[None]], dim=-1)
+
+                # self.prepare_inputs_for_generation()
+
+                decoder_outputs = decoder(gen_sentence)
+                decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
 
         state_iter = enumerate(zip(encoder_state, decoder_state))
         result_list = list()
@@ -944,110 +1071,56 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
 
                 log_prob = joint_state.log_softmax(dim=-1)
                 token_id = log_prob.argmax(dim=-0)
-                if blank_id not in token_id:
+                if self.blank_id not in token_id:
                     token_id = token_id.unsqueeze(0)
                     concat_frame = [reuslt_ids, token_id]
                     reuslt_ids = torch.concat(concat_frame, dim=-1)
 
                     decoder_outputs = decoder(reuslt_ids.unsqueeze(0)[:, 1:])
                     decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+
             max_length = 511
             pad = torch.zeros(max_length - len(reuslt_ids[:max_length]), device=reuslt_ids.device)
             reuslt_ids = torch.concat([reuslt_ids[:max_length], pad])
 
             result_list.append(reuslt_ids)
-
         return torch.stack(result_list)[:, 1:]
 
-    def test_beam_search(self, encoder_state) -> None:
-        beam_width = 5
-        decoder = self.get_decoder()
-        joiner = self.get_joiner()
-        lengths = encoder_state.shape[0]
+        while True:
+            if synced_gpus:
+                # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
+                # The following logic allows an early break if all peers finished generating their sequence
+                this_peer_finished_flag = torch.tensor(0.0 if this_peer_finished else 1.0).to(input_features.device)
+                # send 0.0 if we finished, 1.0 otherwise
+                dist.all_reduce(this_peer_finished_flag, op=dist.ReduceOp.SUM)
+                # did all peers finish? the reduced sum will be 0.0 then
+                if this_peer_finished_flag.item() == 0.0:
+                    break
+            model_inputs = self.prepare_inputs_for_generation(input_features, **model_kwargs)
 
-        first = True
-        device = torch.device("cuda" if encoder_state.is_cuda else "cpu")
-
-        token_list = []  # len=beam_width
-        probability = np.zeros((beam_width,), dtype=float)
-        token_child_list = []  # len=beam_width**2
-        probability_child = np.zeros((beam_width, beam_width), dtype=float)
-
-        # [NOTE]: beam_width 만큼의 list를 만든다음 그 리스트에 값들을 차례대로 넣어가며 예측한다.
-        for i in range(beam_width):
-            token_list.append([0])
-        for i in range(beam_width):
-            token_child_list.append([])
-            for j in range(beam_width):
-                token_child_list[i].append([0])
-
-        # 1 배치 단위의 데이터 들어와야 함
-        for t in range(lengths):
-            max_index = probability.argmax()  # 첫 시작에는 0이 출력됨
-            token = torch.tensor([token_list[max_index]], dtype=torch.long).to(device)  # max_index를 왜 출력하는지 이해안됨
-
-            decoder_outputs = decoder(token)
-            decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
-
-            joiner_outputs = joiner(encoder_state[t].view(-1), decoder_state.view(-1))
-            logits = joiner_outputs.logits
-            out = logits.softmax(dim=0).detach()
-
-            pred_max = torch.argmax(out, dim=0)
-            pred_max = int(pred_max.item())
-            # 이 윗 부분은 time-index의 blank를 예측하기 위해서 만들어 졌음.
-            # blank 값이 아닌 time index를 만났다면 그 이후부터 beam-search를 진행한다.
-            if pred_max != 0:  # y축, rnn-t loss그림에서의 u에 해당됨
-                for token_index in range(len(token_list)):
-                    # RNN-T의 u(반복횟수를) beam_width만큼 진행시키는 듯
-                    token = torch.tensor([token_list[token_index]], dtype=torch.long).to(device)
-                    # token_list가 일종의 root-node인건가?
-                    decoder_outputs = decoder(token)
-                    decoder_state = decoder_outputs.last_hidden_state[:, -1, :]  # last_hidden_state를 얻기 위해서 -1를 하는 듯
-
-                    joiner_outputs = joiner(encoder_state[t].view(-1), decoder_state.view(-1))
-                    # deepcopy 문제를 피하기 위해서 view를 진행함.
-                    logits = joiner_outputs.logits
-                    out = logits.softmax(dim=0).detach()  # 1차원 배
-
-                    values, indices = torch.topk(out, k=beam_width + 1, dim=0)  # 아마 1을 추가한 이유는 blank때문인 듯
-                    # topk는 주어진 원소 중에서 k개의 가장 큰 값들을 추출하는 함수, 이떄 큰 값 순으로 정렬된다.
-                    # ex): k=3, [0, 1, 2, 3, 4, 5] > [5, 4, 3]
-                    # 위와 같은 결과가 나오기 때문에 if first문 에서 모든 행에서 첫 열의 값만 가져간다.
-
-                    values = values.tolist()
-                    indices = indices.tolist()
-
-                    if 0 in indices:  # 첫 시작 떄 token에 있는 blank 값을 삭제함.
-                        zero_index = indices.index(0)  # 매개변수로 건낸 값이 잇는 index위치 값을 반환함
-                        # blank값이 하나만 나온다는 확신이 있어서 하나만 제거하나?
-                        # 2개 3개 나올 수 있는거 아닌기?
-                        indices.pop(zero_index)
-                        values.pop(zero_index)
-                    else:
-                        indices.pop(-1)
-                        values.pop(-1)
-                        # topk시 blank값을 고려해 beam_width + 1을 하기 때문에 opk 6개의 값이 나오게 된다.
-                    if first:
-                        for i in range(len(indices)):
-                            token_child_list[i][token_index].append(indices[i])
-                            probability_child[:, token_index] = np.log(values)  # 최초로 log_prob을 추가시키는 곳
-                    else:
-                        for i in range(len(indices)):
-                            token_child_list[token_index][i].append(indices[i])
-                            probability_child[token_index] = probability[token_index] + np.log(values)
-                if first:
-                    first = False
-                    for i in range(beam_width):
-                        token_list[i] = copy.deepcopy(token_child_list[i][0])  # 첫 루트 노드에다가 누적 화률 값을 입력하는 곳
-                        probability[i] = copy.deepcopy(probability_child[i, 0])
-                else:
-                    top_k_index = heapq.nlargest(beam_width, range(beam_width**2), key=probability_child.take)
-                    for i in range(len(top_k_index)):
-                        index = top_k_index[i]
-                        probability[i] = copy.deepcopy(probability_child[index // beam_width, index % beam_width])
-                        token_list[i] = copy.deepcopy(token_child_list[index // beam_width][index % beam_width])
-
-        max_index = probability.argmax()
-        token_list = token_list[max_index]
-        return token_list[1:]
+            outputs = decoder(
+                **model_inputs,
+                return_dict=True,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+            )
+        if return_dict_in_generate:
+            if self.config.is_encoder_decoder:
+                return GreedySearchEncoderDecoderOutput(
+                    sequences=input_features,
+                    scores=scores,
+                    encoder_attentions=encoder_attentions,
+                    encoder_hidden_states=encoder_hidden_states,
+                    decoder_attentions=decoder_attentions,
+                    cross_attentions=cross_attentions,
+                    decoder_hidden_states=decoder_hidden_states,
+                )
+            else:
+                return GreedySearchDecoderOnlyOutput(
+                    sequences=input_features,
+                    scores=scores,
+                    attentions=decoder_attentions,
+                    hidden_states=decoder_hidden_states,
+                )
+        else:
+            return input_features

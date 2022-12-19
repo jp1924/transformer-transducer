@@ -1,6 +1,3 @@
-import copy
-import heapq
-import math
 import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -8,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchaudio.functional import rnnt_loss
 from transformers import PretrainedConfig
 from transformers.activations import ACT2FN
@@ -1011,10 +1009,11 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         # self.test_beam_search(transducer_outputs.audio_last_hidden_state[0])
         # [NOTE]: transformer-transducer는 메모리를 많이 차지하기 때문에 임시로 empty_cache를 진행함
         #         torch profiler를 이용해 값을 확인할 것
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
         if not return_dict:
             return None
+
         return RNNTBaseOutput(loss=loss, logits=logits)
 
     def prepare_inputs_for_generation(
@@ -1039,8 +1038,6 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         logits_processor: Optional[LogitsProcessorList] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         max_length: Optional[int] = None,
-        pad_token_id: Optional[int] = None,
-        eos_token_id: Optional[int] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         output_scores: Optional[bool] = None,
@@ -1053,6 +1050,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
 
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
         stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
+        
         if max_length is not None:
             warnings.warn(
                 "`max_length` is deprecated in this function, use"
@@ -1060,6 +1058,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 UserWarning,
             )
             stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
+        
         output_scores = output_scores if output_scores is not None else self.config.output_scores
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1093,18 +1092,28 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         joiner = self.get_joiner()
 
         decoder_outputs = decoder(input_features)
-        decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+        decoder_state = decoder_outputs.last_hidden_state
         encoder_state = encoder_outputs.last_hidden_state
-
         feature_length = encoder_state.shape[1]
-        time_idx = 0
 
+        decoding_list = list()
         state_iter = enumerate(zip(encoder_state, decoder_state))
         for batch_idx, (audio_logits, decoder_state) in state_iter:
+            time_idx = 0
             gen_sentence = input_features[batch_idx]
 
             while True:
-                if time_idx == feature_length and len(gen_sentence) == 512:
+                if synced_gpus:
+                    # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
+                    # The following logic allows an early break if all peers finished generating their sequence
+                    this_peer_finished_flag = torch.tensor(0.0 if this_peer_finished else 1.0).to(input_features.device)
+                    # send 0.0 if we finished, 1.0 otherwise
+                    dist.all_reduce(this_peer_finished_flag, op=dist.ReduceOp.SUM)
+                    # did all peers finish? the reduced sum will be 0.0 then
+                    if this_peer_finished_flag.item() == 0.0:
+                        break
+
+                if time_idx == feature_length or len(gen_sentence) == 512:
                     break
 
                 current_state = audio_logits[time_idx].view(-1)
@@ -1113,7 +1122,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 joiner_outputs = joiner(current_state, decoder_state)
                 next_token_logits = joiner_outputs.logits
 
-                next_tokens_scores = logits_processor(input_features, next_token_logits)
+                next_tokens_scores = logits_processor(gen_sentence, next_token_logits)
                 next_tokens_scores = torch.log_softmax(next_tokens_scores, dim=-1)
 
                 next_token = torch.argmax(next_tokens_scores)
@@ -1144,60 +1153,18 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
 
                 gen_sentence = torch.cat([gen_sentence, next_token[None]], dim=-1)
 
-                # self.prepare_inputs_for_generation()
-
-                decoder_outputs = decoder(gen_sentence)
+                decoder_outputs = decoder(gen_sentence.unsqueeze(0))
                 decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+            decoding_list.append(gen_sentence)
 
-        state_iter = enumerate(zip(encoder_state, decoder_state))
-        result_list = list()
-        for batch_idx, (audio_logits, decoder_state) in state_iter:
-            # decoder_outputs = decoder(start_token)
-            # decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
-            time_seq = audio_logits.shape[0]
-            reuslt_ids = input_features[batch_idx]
+        # [NOTE]: 일반적인 generate의 greedy search의 경우 model이 batch_size만큼 하나씩 예측해 나가기 때문에 cocnat및 pad문제에서 자유롭다.
+        #         하지만 streaming 모델의 경우 위와 같은 방법으로 예측할 수 없기 때문에 별도로 pad를 붙여줘야 한다.
+        inner_max_length = max([len(sentence) for sentence in decoding_list])
+        pad_shape = (0, inner_max_length)
+        # [NOTE]: 계산의 간소화를 위해 슬라이싱을 이용해 잘라내도록 한다.
+        decoding_list = [F.pad(tensor, pad_shape)[:inner_max_length] for tensor in decoding_list]
+        input_features = torch.stack(decoding_list)
 
-            for time_idx in range(time_seq):
-                current_state = audio_logits[time_idx]
-                # [NOTE]: just output 1d tensor
-                joint_outputs = joiner(current_state.view(-1), decoder_state.view(-1))
-                joint_state = joint_outputs.hidden_state
-
-                log_prob = joint_state.log_softmax(dim=-1)
-                token_id = log_prob.argmax(dim=-0)
-                if self.blank_id not in token_id:
-                    token_id = token_id.unsqueeze(0)
-                    concat_frame = [reuslt_ids, token_id]
-                    reuslt_ids = torch.concat(concat_frame, dim=-1)
-
-                    decoder_outputs = decoder(reuslt_ids.unsqueeze(0)[:, 1:])
-                    decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
-
-            max_length = 511
-            pad = torch.zeros(max_length - len(reuslt_ids[:max_length]), device=reuslt_ids.device)
-            reuslt_ids = torch.concat([reuslt_ids[:max_length], pad])
-
-            result_list.append(reuslt_ids)
-        return torch.stack(result_list)[:, 1:]
-
-        while True:
-            if synced_gpus:
-                # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
-                # The following logic allows an early break if all peers finished generating their sequence
-                this_peer_finished_flag = torch.tensor(0.0 if this_peer_finished else 1.0).to(input_features.device)
-                # send 0.0 if we finished, 1.0 otherwise
-                dist.all_reduce(this_peer_finished_flag, op=dist.ReduceOp.SUM)
-                # did all peers finish? the reduced sum will be 0.0 then
-                if this_peer_finished_flag.item() == 0.0:
-                    break
-            model_inputs = self.prepare_inputs_for_generation(input_features, **model_kwargs)
-
-            outputs = decoder(
-                **model_inputs,
-                return_dict=True,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-            )
         if return_dict_in_generate:
             if self.config.is_encoder_decoder:
                 return GreedySearchEncoderDecoderOutput(
@@ -1218,3 +1185,39 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 )
         else:
             return input_features
+
+
+"""
+    비교를 위한 greedy search
+
+        result_list = list()
+        state_iter = enumerate(zip(encoder_state, decoder_state))
+        for batch_idx, (audio_logits, decoder_state) in state_iter:
+            # decoder_outputs = decoder(start_token)
+            # decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+            time_seq = audio_logits.shape[0]
+            reuslt_ids = input_features[batch_idx]
+
+            for time_idx in range(time_seq):
+                current_state = audio_logits[time_idx]
+                # [NOTE]: just output 1d tensor
+                joint_outputs = joiner(current_state.view(-1), decoder_state.view(-1))
+                joint_state = joint_outputs.logits
+
+                log_prob = joint_state.log_softmax(dim=-1)
+                token_id = log_prob.argmax(dim=-0)
+                if self.blank_id not in token_id:
+                    token_id = token_id.unsqueeze(0)
+                    concat_frame = [reuslt_ids, token_id]
+                    reuslt_ids = torch.concat(concat_frame, dim=-1)
+
+                    decoder_outputs = decoder(reuslt_ids.unsqueeze(0)[:, 1:])
+                    decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
+            max_length = 511
+            pad = torch.zeros(max_length - len(reuslt_ids[:max_length]), device=reuslt_ids.device)
+            reuslt_ids = torch.concat([reuslt_ids[:max_length], pad])
+
+            result_list.append(reuslt_ids)
+        return torch.stack(result_list)[:, 1:]
+
+"""

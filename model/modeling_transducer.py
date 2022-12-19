@@ -12,6 +12,11 @@ from transformers.activations import ACT2FN
 from transformers.generation_logits_process import LogitsProcessorList
 from transformers.generation_stopping_criteria import StoppingCriteriaList, validate_stopping_criteria
 from transformers.modeling_utils import PreTrainedModel
+from transformers.generation_utils import (
+    GreedySearchDecoderOnlyOutput,
+    GreedySearchEncoderDecoderOutput,
+    GreedySearchOutput,
+)
 from transformers.utils import ModelOutput
 from .config import TransformerTransducerConfig
 import torch.distributed as dist
@@ -49,79 +54,6 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
     inverted_mask = 1.0 - expanded_mask
 
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
-
-
-@dataclass
-class GreedySearchDecoderOnlyOutput(ModelOutput):
-    """
-    Base class for outputs of decoder-only generation models using greedy search.
-
-
-    Args:
-        sequences (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
-            if all batches finished early due to the `eos_token_id`.
-        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
-            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
-            at each generation step. Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one element for
-            each generated token), with each tensor of shape `(batch_size, config.vocab_size)`.
-        attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
-        hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, generated_length, hidden_size)`.
-    """
-
-    sequences: torch.LongTensor = None
-    scores: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-    hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-
-
-@dataclass
-class GreedySearchEncoderDecoderOutput(ModelOutput):
-    """
-    Base class for outputs of encoder-decoder generation models using greedy search. Hidden states and attention
-    weights of the decoder (respectively the encoder) can be accessed via the encoder_attentions and the
-    encoder_hidden_states attributes (respectively the decoder_attentions and the decoder_hidden_states attributes)
-
-
-    Args:
-        sequences (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
-            if all batches finished early due to the `eos_token_id`.
-        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
-            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
-            at each generation step. Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one element for
-            each generated token), with each tensor of shape `(batch_size, config.vocab_size)`.
-        encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
-            Tuple of `torch.FloatTensor` (one for each layer of the decoder) of shape `(batch_size, num_heads,
-            sequence_length, sequence_length)`.
-        encoder_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
-            shape `(batch_size, sequence_length, hidden_size)`.
-        decoder_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
-        cross_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
-        decoder_hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, generated_length, hidden_size)`.
-    """
-
-    sequences: torch.LongTensor = None
-    scores: Optional[Tuple[torch.FloatTensor]] = None
-    encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
-    encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    decoder_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-    cross_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-    decoder_hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-
-
-GreedySearchOutput = Union[GreedySearchEncoderDecoderOutput, GreedySearchDecoderOnlyOutput]
 
 
 @dataclass
@@ -1050,7 +982,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
 
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
         stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
-        
+
         if max_length is not None:
             warnings.warn(
                 "`max_length` is deprecated in this function, use"
@@ -1058,7 +990,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 UserWarning,
             )
             stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
-        
+
         output_scores = output_scores if output_scores is not None else self.config.output_scores
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1094,8 +1026,8 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         decoder_outputs = decoder(input_features)
         decoder_state = decoder_outputs.last_hidden_state
         encoder_state = encoder_outputs.last_hidden_state
-        feature_length = encoder_state.shape[1]
-
+        feature_length = encoder_state.shape[1] - 1
+        # [NOTE]: 모든 index는 0번에서 시작하기 때문에 index에 맞추기 위해서는 1을 제거할 필요가 있다.
         decoding_list = list()
         state_iter = enumerate(zip(encoder_state, decoder_state))
         for batch_idx, (audio_logits, decoder_state) in state_iter:
@@ -1131,7 +1063,6 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 if next_token == self.blank_id:
                     time_idx += 1
                     continue
-
                 if return_dict_in_generate:
                     if output_scores:
                         scores += (next_token_score,)
@@ -1153,7 +1084,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
 
                 gen_sentence = torch.cat([gen_sentence, next_token[None]], dim=-1)
 
-                decoder_outputs = decoder(gen_sentence.unsqueeze(0))
+                decoder_outputs = decoder(gen_sentence[1:].unsqueeze(0))
                 decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
             decoding_list.append(gen_sentence)
 
@@ -1185,6 +1116,84 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 )
         else:
             return input_features
+
+    @torch.no_grad()
+    def recognize_improved_beams(
+        self,
+        inputs: torch.Tensor,
+        inputs_lengths: int,
+        blank_token_id: int,
+        beam_widths: int = 100,
+        state_beam: float = 4.6,
+        expand_beam: float = 2.3,
+        lm=None,
+    ):
+        # 모델 학습은 batch단위로 했지만, 실시간의 inference는 batch가 있을 수 없다. 때문에 1배치만 들어올 것이기 때문에, 맨 앞에 것만 본다.
+        encoder_outputs = self.encoder(inputs, inputs_lengths)[0]
+        B_hyps = [{"score": 0.0, "y_star": [blank_token_id], "hidden_state": None}]
+        for encoder_output in encoder_outputs:
+            A_hyps = B_hyps
+            B_hyps = []
+            # A에서 몇번째 골랐는지 판단함. (단순 로깅용)
+            nth_extension_candidate_from_a = 0
+
+            # A를 전부 확인했으면 더 이상 beam에 넣을 것도 없으므로, 무한루프에 빠지지 않도록 처리.
+            while len(A_hyps) > 0:
+                most_prob_A = max(A_hyps, key=lambda x: x["score"])
+
+                # 변수명은 논문과 동일하게 처리
+                a_best_hyp = max(A_hyps, key=lambda x: x["score"])["score"]
+                if len(B_hyps) == 0:
+                    # B_hyps이 하나도 없다는 것은 처음 들어온 음성이라는 의미이므로, 어떤 상황에서도 진행시켜야 되니, 엄청 작은 log_prob값을 적용함.
+                    b_best_hyp = -9999.0
+                else:
+                    b_best_hyp = max(B_hyps, key=lambda x: x["score"])["score"]
+
+                # 일반 beam을 돌리다보면 RNNT는 거의 비등비등하게 나오는데
+                # 확률상 쓰레시홀드를 줘서, A를 더 확장 시켜봐야 B보다 좋아질 여지가 거진 없으면, 그냥 다 뽑았다고 생각하고 out한다.
+                if b_best_hyp >= state_beam + a_best_hyp:
+                    break
+                A_hyps.remove(most_prob_A)
+
+                # RNNT는 맨 마지막 것만 들어가야 한다.
+                decoder_input = torch.tensor(
+                    [most_prob_A["y_star"][-1]], dtype=torch.long, device=encoder_output.device
+                )
+                decoder_output, hidden_state = self.decoder(
+                    decoder_input, prev_hidden_state=most_prob_A["hidden_state"]
+                )
+                y = self.joint(encoder_output.view(-1), decoder_output.view(-1))
+
+                most_prob_a_next_scores = torch.log_softmax(y, dim=0)
+                best_prob = max(most_prob_a_next_scores[1:])
+                nth_extension_candidate_from_a += 1
+                for k, k_score in enumerate(most_prob_a_next_scores):
+                    beam_hyp = {
+                        "score": most_prob_A["score"] + float(k_score),
+                        "y_star": copy.deepcopy(most_prob_A["y_star"]),
+                        "hidden_state": most_prob_A["hidden_state"],
+                    }
+
+                    if k == blank_token_id:
+                        B_hyps.append(beam_hyp)
+                    else:
+                        # 현재 예측값 max(=best_prob)에서 패널티(=expand_beam)를 준것보다 작은 vocab의 prob은
+                        # 확률 소수점 곱 연산으로 인해, 어짜피 진행될수록 더 작아질테니, 영향을 못줄 가능성이 높아서, prune 시켜버린다.
+                        if k_score >= best_prob - expand_beam:
+                            if beam_hyp["y_star"][-1] != int(k):
+                                # blank가 나오기 전 텍스트 예측은 직전값과 중복으로 들어가면 안됨.
+                                beam_hyp["y_star"].append(int(k))
+                            beam_hyp["hidden_state"] = hidden_state
+
+                            A_hyps.append(beam_hyp)
+
+                most_prob_next_A = max(A_hyps, key=lambda a: a["score"])["score"]
+                most_prob_next_B = max(B_hyps, key=lambda a: a["score"])["score"]
+                if len(B_hyps) >= beam_widths and most_prob_next_B >= most_prob_next_A:
+                    break
+
+        nbest_hyps = sorted(B_hyps, key=lambda x: x["score"] / len(x["y_star"]), reverse=True)[:beam_widths]
+        return [item["y_star"] for item in nbest_hyps]
 
 
 """

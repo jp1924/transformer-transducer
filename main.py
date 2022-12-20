@@ -9,10 +9,46 @@ from datasets import Dataset
 from evaluate import load
 from model import TransformerTranducerForRNNT, TransformerTransducerConfig
 from setproctitle import setproctitle
-from transformers import HfArgumentParser, Seq2SeqTrainer, Wav2Vec2Tokenizer, set_seed
+from transformers import HfArgumentParser, Trainer, Wav2Vec2Tokenizer, set_seed
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
 from utils import DataArguments, ModelArguments, TransducerTrainArgument
+
+
+def concat_frame(features, left_context_width, right_context_width):
+    bsz = len(features)
+
+    stack = []
+    for b in range(bsz):
+        time_steps, features_dim = features[b].shape
+        concated_features = np.zeros(
+            shape=[time_steps, features_dim * (1 + left_context_width + right_context_width)], dtype=features[b].dtype
+        )
+        # middle part is just the uttarnce
+        concated_features[:, left_context_width * features_dim : (left_context_width + 1) * features_dim] = features[b]
+
+        for i in range(left_context_width):
+            # add left context
+            concated_features[
+                i + 1 : time_steps,
+                (left_context_width - i - 1) * features_dim : (left_context_width - i) * features_dim,
+            ] = features[b][0 : time_steps - i - 1, :]
+
+        for i in range(right_context_width):
+            # add right context
+            concated_features[
+                0 : time_steps - i - 1,
+                (right_context_width + i + 1) * features_dim : (right_context_width + i + 2) * features_dim,
+            ] = features[b][i + 1 : time_steps, :]
+
+        concated_features = np.delete(concated_features, range(left_context_width), axis=0)
+        concated_features = np.delete(
+            concated_features,
+            [(x + concated_features.shape[0] - right_context_width) for x in range(right_context_width)],
+            axis=0,
+        )
+        stack.append(concated_features)
+    return stack
 
 
 def main(parser: HfArgumentParser) -> None:
@@ -48,19 +84,6 @@ def main(parser: HfArgumentParser) -> None:
 
         return result
 
-    def logits_for_metrics(logits: Union[Tuple, torch.Tensor], _) -> torch.Tensor:
-        """_logits_for_metrics_
-            Trainer.evaluation_loop에서 사용되는 함수로 logits를 argmax를 이용해
-            축소 시켜 공간복잡도를 줄이기 위한 목적으로 작성되었습니다.
-        Args:
-            logits (Union[Tuple, torch.Tensor]): Model을 거쳐서 나온 3차원 (bch, sqr, hdn)의 logits을 전달받습니다.
-            _ : label이 입력되는 부분이지만 사용되지 않기에 하이픈처리 했습니다.
-        Returns:
-            torch.Tensor: 차원을 축소한 뒤의 torch.Tensor를 반환합니다.
-        """
-        return_logits = logits.argmax(dim=-1)
-        return return_logits
-
     tokenizer = Wav2Vec2Tokenizer.from_pretrained("test42/kerberus2", use_auth_token=True)
     config = TransformerTransducerConfig(tokenizer.vocab_size)
     model = TransformerTranducerForRNNT(config)
@@ -86,6 +109,7 @@ def main(parser: HfArgumentParser) -> None:
         train_args.mel_stack,
         train_args.window_stride,
         extractor=extractor,
+        blank_id=config.blank_id,
     )
     callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
 
@@ -98,7 +122,6 @@ def main(parser: HfArgumentParser) -> None:
         compute_metrics=metrics,
         data_collator=collator,
         callbacks=callbacks,
-        preprocess_logits_for_metrics=logits_for_metrics,
     )
     if train_args.do_train:
         train(trainer, train_args)
@@ -120,7 +143,9 @@ def train(trainer: Seq2SeqTrainer, args: Namespace) -> None:
         trainer (Seq2SeqTrainer): Huggingface의 torch Seq2SeqTrainer를 전달받습니다.
         args (Namespace): Seq2SeqTrainingArgument를 전달받습니다.
     """
+    # with profile(activities=[ProfilerActivity.CUDA], profile_memory=True, use_cuda=True) as prof:
     outputs = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    # prof.export_chrome_trace("trace.json")
     if is_main_process(args.local_rank):
         model_name = trainer.model.name_or_path
         save_path = os.path.join(args.output_dir, model_name)

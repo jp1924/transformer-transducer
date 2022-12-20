@@ -9,46 +9,10 @@ from datasets import Dataset
 from evaluate import load
 from model import TransformerTranducerForRNNT, TransformerTransducerConfig
 from setproctitle import setproctitle
-from transformers import HfArgumentParser, Trainer, Wav2Vec2Tokenizer, set_seed
+from transformers import HfArgumentParser, Seq2SeqTrainer, Wav2Vec2Tokenizer, set_seed
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
 from utils import DataArguments, ModelArguments, TransducerTrainArgument
-
-
-def concat_frame(features, left_context_width, right_context_width):
-    bsz = len(features)
-
-    stack = []
-    for b in range(bsz):
-        time_steps, features_dim = features[b].shape
-        concated_features = np.zeros(
-            shape=[time_steps, features_dim * (1 + left_context_width + right_context_width)], dtype=features[b].dtype
-        )
-        # middle part is just the uttarnce
-        concated_features[:, left_context_width * features_dim : (left_context_width + 1) * features_dim] = features[b]
-
-        for i in range(left_context_width):
-            # add left context
-            concated_features[
-                i + 1 : time_steps,
-                (left_context_width - i - 1) * features_dim : (left_context_width - i) * features_dim,
-            ] = features[b][0 : time_steps - i - 1, :]
-
-        for i in range(right_context_width):
-            # add right context
-            concated_features[
-                0 : time_steps - i - 1,
-                (right_context_width + i + 1) * features_dim : (right_context_width + i + 2) * features_dim,
-            ] = features[b][i + 1 : time_steps, :]
-
-        concated_features = np.delete(concated_features, range(left_context_width), axis=0)
-        concated_features = np.delete(
-            concated_features,
-            [(x + concated_features.shape[0] - right_context_width) for x in range(right_context_width)],
-            axis=0,
-        )
-        stack.append(concated_features)
-    return stack
 
 
 def main(parser: HfArgumentParser) -> None:

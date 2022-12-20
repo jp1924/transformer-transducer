@@ -7,3 +7,4 @@ setproctitle
 wheel
 black
 flake8
+sentencepiece

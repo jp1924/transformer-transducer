@@ -1,6 +1,3 @@
-import copy
-import heapq
-import math
 import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -8,14 +5,26 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchaudio.functional import rnnt_loss
 from transformers import PretrainedConfig
 from transformers.activations import ACT2FN
 from transformers.generation_logits_process import LogitsProcessorList
 from transformers.generation_stopping_criteria import StoppingCriteriaList, validate_stopping_criteria
 from transformers.modeling_utils import PreTrainedModel
+from transformers.generation_utils import (
+    GreedySearchDecoderOnlyOutput,
+    GreedySearchEncoderDecoderOutput,
+    GreedySearchOutput,
+)
 from transformers.utils import ModelOutput
 from .config import TransformerTransducerConfig
+import torch.distributed as dist
+from transformers.utils import logging
+import random
+
+
+logger = logging.get_logger(__name__)
 
 
 def _make_causal_mask(input_ids_shape: torch.Size, dtype: torch.dtype, past_key_values_length: int = 0):
@@ -48,115 +57,51 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
 
 
 @dataclass
-class GreedySearchDecoderOnlyOutput(ModelOutput):
-    """
-    Base class for outputs of decoder-only generation models using greedy search.
-
-
-    Args:
-        sequences (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
-            if all batches finished early due to the `eos_token_id`.
-        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
-            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
-            at each generation step. Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one element for
-            each generated token), with each tensor of shape `(batch_size, config.vocab_size)`.
-        attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
-        hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, generated_length, hidden_size)`.
-    """
-
-    sequences: torch.LongTensor = None
-    scores: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-    hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-
-
-@dataclass
-class GreedySearchEncoderDecoderOutput(ModelOutput):
-    """
-    Base class for outputs of encoder-decoder generation models using greedy search. Hidden states and attention
-    weights of the decoder (respectively the encoder) can be accessed via the encoder_attentions and the
-    encoder_hidden_states attributes (respectively the decoder_attentions and the decoder_hidden_states attributes)
-
-
-    Args:
-        sequences (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
-            if all batches finished early due to the `eos_token_id`.
-        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
-            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
-            at each generation step. Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one element for
-            each generated token), with each tensor of shape `(batch_size, config.vocab_size)`.
-        encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
-            Tuple of `torch.FloatTensor` (one for each layer of the decoder) of shape `(batch_size, num_heads,
-            sequence_length, sequence_length)`.
-        encoder_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
-            shape `(batch_size, sequence_length, hidden_size)`.
-        decoder_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
-        cross_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
-        decoder_hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, generated_length, hidden_size)`.
-    """
-
-    sequences: torch.LongTensor = None
-    scores: Optional[Tuple[torch.FloatTensor]] = None
-    encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
-    encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    decoder_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-    cross_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-    decoder_hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-
-
-GreedySearchOutput = Union[GreedySearchEncoderDecoderOutput, GreedySearchDecoderOnlyOutput]
+class DecoderOutput(ModelOutput):
+    last_hidden_states: torch.Tensor
+    decoder_attentions: Optional[torch.Tensor] = None
+    decoder_hidden_states: Optional[torch.Tensor] = None
 
 
 @dataclass
 class EncoderOutput(ModelOutput):
-    last_hidden_state: torch.Tensor
-    hidden_states: torch.Tensor = None
-    attentions: torch.Tensor = None
+    last_hidden_states: torch.Tensor
+    encoder_attentions: Optional[torch.Tensor] = None
+    encoder_hidden_states: Optional[torch.Tensor] = None
 
 
 @dataclass
 class JoinerOutput(ModelOutput):
     logits: torch.Tensor
-    audio_hidden: torch.Tensor = None
-    label_hidden: torch.Tensor = None
+    encoder_hidden_states: Optional[torch.Tensor] = None
+    decoder_hidden_states: Optional[torch.Tensor] = None
 
 
 @dataclass
 class TransducerBaseModelOutput(ModelOutput):
     logits: torch.Tensor
 
-    audio_last_hidden_state: torch.Tensor = None
-    audio_hidden_states: torch.Tensor = None
-    audio_attentions: torch.Tensor = None
+    encoder_last_hidden_states: Optional[torch.Tensor] = None
+    encoder_hidden_states: Optional[torch.Tensor] = None
+    encoder_attentions: Optional[torch.Tensor] = None
 
-    label_last_hidden_state: torch.Tensor = None
-    label_hidden_states: torch.Tensor = None
-    label_attentions: torch.Tensor = None
+    decoder_last_hidden_states: Optional[torch.Tensor] = None
+    decoder_hidden_states: Optional[torch.Tensor] = None
+    decoder_attentions: Optional[torch.Tensor] = None
 
 
 @dataclass
 class RNNTBaseOutput(ModelOutput):
-    loss: torch.Tensor = None
-    logits: torch.Tensor = None
+    loss: Optional[torch.Tensor] = None
+    logits: Optional[torch.Tensor] = None
 
-    audio_hidden_states: torch.Tensor = None
-    audio_attentions: torch.Tensor = None
+    encoder_attentions: Optional[torch.Tensor] = None
+    decoder_attentions: Optional[torch.Tensor] = None
+    encoder_hidden_states: Optional[torch.Tensor] = None
+    decoder_hidden_states: Optional[torch.Tensor] = None
 
-    label_hidden_states: torch.Tensor = None
-    label_attentions: torch.Tensor = None
+
+# =====================================================
 
 
 class TransducerPretrainedModel(PreTrainedModel):
@@ -190,70 +135,80 @@ class TransducerPretrainedModel(PreTrainedModel):
 class TransducerSelfAttention(nn.Module):
     def __init__(self, config: PretrainedConfig, position_embedding_type=None):
         super().__init__()
-        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
+        # [NOTE]: BART attention layer를 참고해서 만들었다.
+        #         이유: Wav2Vec2도 BART attention을 참고해서 만들었기 때문에
+        self.num_heads = config.num_attention_heads
+        self.embed_dim = config.hidden_size
+        self.head_dim = self.embed_dim // self.num_heads
+
+        if (self.head_dim * self.num_heads) != self.embed_dim:
             raise ValueError(
-                f"The hidden size ({config.hidden_size}) is not a multiple of the number of attention "
-                f"heads ({config.num_attention_heads})"
+                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
+                f" and `num_heads`: {self.num_heads})."
             )
+        self.scaling = self.head_dim**-0.5
 
-        self.num_attention_heads = config.num_attention_heads
-        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
-        self.all_head_size = self.num_attention_heads * self.attention_head_size
-
-        self.query = nn.Linear(config.hidden_size, self.all_head_size)
-        self.key = nn.Linear(config.hidden_size, self.all_head_size)
-        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+        # [NOTE]: 일반 BART attention module은 Linear layer의 bias 설정 여부를 매개변수로 설정할 수 있도록 만들어 놨었음
+        #         왜 그렇게 만들었는지는 모르겠지만 Transformer 특정상 bias는 무조건 필요하다고 하기 때문에 bias는 삭제함.
+        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
 
         self.dropout = nn.Dropout(config.attention_dropout)
+
+        # [XXX]]: bert의 positional encoding을 추가시킴, 하지만 이 positional encoding이 어떤 영향을 미칠 지 모르기 때문에 테스트가 필요함
         self.position_embedding_type = position_embedding_type or getattr(config, "position_embedding_type", "absolute")
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             self.max_position_embeddings = config.max_position_embeddings
             self.distance_embedding = nn.Embedding(2 * config.max_position_embeddings - 1, self.attention_head_size)
-
         self.is_decoder = config.is_decoder
 
-    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
-        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        x = x.view(new_x_shape)
-        return x.permute(0, 2, 1, 3)
+    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
+        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
-        past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
-        output_attentions: Optional[bool] = False,
-    ) -> Tuple[torch.Tensor]:
-        mixed_query_layer = self.query(hidden_states)
+        attention_mask: Optional[torch.Tensor] = None,
+        key_value_states: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        """Input shape: Batch x Time x Channel"""
 
-        # If this is instantiated as a cross-attention module, the keys
-        # and values come from an encoder; the attention mask needs to be
-        # such that the encoder's padding tokens are not attended to.
-        is_cross_attention = encoder_hidden_states is not None
+        bsz, tgt_len, _ = hidden_states.size()
 
-        if is_cross_attention and past_key_value is not None:
-            # reuse k,v, cross_attentions
-            key_layer = past_key_value[0]
-            value_layer = past_key_value[1]
-            attention_mask = encoder_attention_mask
-        elif is_cross_attention:
-            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
-            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
-            attention_mask = encoder_attention_mask
+        # get query proj
+        query_states = self.q_proj(hidden_states) * self.scaling
+
+        # [NOTE]: BART Attention에 있던 Prefix tuning을 위한 구문은 삭제함.
+        #         streming모델에서 사용할 가능성이 보이지 않았기 때문,
+
+        #         decoder에서는 사용될 수 있나??? 그건 잘 모르겠다. 다만
+        #         prefix-tuning의 특징 상 streming에 적용시키기 어려울 듯
+
+        # if key_value_states are provided this layer is used as a cross-attention layer
+        # for the decoder
+        is_cross_attention = key_value_states is not None
+        if is_cross_attention:
+            # cross_attentions
+            key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
+            value_states = self._shape(self.v_proj(key_value_states), -1, bsz)
         elif past_key_value is not None:
-            key_layer = self.transpose_for_scores(self.key(hidden_states))
-            value_layer = self.transpose_for_scores(self.value(hidden_states))
-            key_layer = torch.cat([past_key_value[0], key_layer], dim=2)
-            value_layer = torch.cat([past_key_value[1], value_layer], dim=2)
+            # reuse k, v, self_attention
+            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
+            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
         else:
-            key_layer = self.transpose_for_scores(self.key(hidden_states))
-            value_layer = self.transpose_for_scores(self.value(hidden_states))
+            # self_attention
+            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
+            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
 
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-
+        # [TODO]: Transducer 계열의 모델들은 encoder, decoder를 다양하게 조합해서 진행하기 때문에
+        #         이후 cross-attention이 사용될 가능성이 있음. 나중에 Cross-attention이 가능하도록 코드를 작성할 것
         if self.is_decoder:
             # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
             # Further calls to cross_attention layer can then reuse all cross-attention
@@ -262,59 +217,100 @@ class TransducerSelfAttention(nn.Module):
             # all previous decoder key/value_states. Further calls to uni-directional self-attention
             # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
             # if encoder bi-directional self-attention `past_key_value` is always `None`
-            past_key_value = (key_layer, value_layer)
+            past_key_value = (key_states, value_states)
 
-        # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        proj_shape = (bsz * self.num_heads, -1, self.head_dim)
+        query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
+        key_states = key_states.view(*proj_shape)
+        value_states = value_states.view(*proj_shape)
 
+        src_len = key_states.size(1)
+        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
+
+        # [XXX]: Bert positional_embedding, 테스트 해보고 성능에 긍정적인 영향을 미치면 bert로 갈아탈 것
+        use_cache = past_key_value is not None
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
-            seq_length = hidden_states.size()[1]
-            position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
-            position_ids_r = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
+            query_length, key_length = query_states.shape[2], key_states.shape[2]
+            if use_cache:
+                position_ids_l = torch.tensor(key_length - 1, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+            else:
+                position_ids_l = torch.arange(query_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+            position_ids_r = torch.arange(key_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
             distance = position_ids_l - position_ids_r
+
             positional_embedding = self.distance_embedding(distance + self.max_position_embeddings - 1)
-            positional_embedding = positional_embedding.to(dtype=query_layer.dtype)  # fp16 compatibility
+            positional_embedding = positional_embedding.to(dtype=query_states.dtype)  # fp16 compatibility
 
             if self.position_embedding_type == "relative_key":
-                relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
-                attention_scores = attention_scores + relative_position_scores
+                relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_states, positional_embedding)
+                attention_scores = attn_weights + relative_position_scores
             elif self.position_embedding_type == "relative_key_query":
-                relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
-                relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_layer, positional_embedding)
+                relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_states, positional_embedding)
+                relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_states, positional_embedding)
                 attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
 
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
+            raise ValueError(
+                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is"
+                f" {attn_weights.size()}"
+            )
+
         if attention_mask is not None:
-            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
-            attention_scores = attention_scores + attention_mask
+            if attention_mask.size() != (bsz, 1, tgt_len, src_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is {attention_mask.size()}"
+                )
+            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + attention_mask
+            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
-        # Normalize the attention scores to probabilities.
-        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
 
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs = self.dropout(attention_probs)
-
-        # Mask heads if we want to
         if head_mask is not None:
-            attention_probs = attention_probs * head_mask
+            if head_mask.size() != (self.num_heads,):
+                raise ValueError(
+                    f"Head mask for a single layer should be of size {(self.num_heads,)}, but is" f" {head_mask.size()}"
+                )
+            attn_weights = head_mask.view(1, -1, 1, 1) * attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
-        context_layer = torch.matmul(attention_probs, value_layer)
+        if output_attentions:
+            # this operation is a bit awkward, but it's required to
+            # make sure that attn_weights keeps its gradient.
+            # In order to do so, attn_weights have to be reshaped
+            # twice and have to be reused in the following
+            attn_weights_reshaped = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            attn_weights = attn_weights_reshaped.view(bsz * self.num_heads, tgt_len, src_len)
+        else:
+            attn_weights_reshaped = None
 
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(new_context_layer_shape)
+        # [NOTE]: 이 층은 아래의 self.dropout으로 바뀜
+        # attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
 
-        outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
+        attn_probs = self.dropout(attn_weights)
 
-        if self.is_decoder:
-            outputs = outputs + (past_key_value,)
-        return outputs
+        attn_output = torch.bmm(attn_probs, value_states)
+
+        if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+        attn_output = attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
+        attn_output = attn_output.transpose(1, 2)
+
+        # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
+        # partitioned aross GPUs when using tensor-parallelism.
+        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
+        attn_output = self.out_proj(attn_output)
+
+        return attn_output, attn_weights_reshaped, past_key_value
 
 
 class TransducerFeedForward(nn.Module):
     def __init__(self, config: PretrainedConfig):
         super().__init__()
+        # [NOTE]: Wav2Vec2를 참고해서 만들었음.
         self.intermediate_dropout = nn.Dropout(config.activation_dropout)
 
         self.intermediate_dense = nn.Linear(config.hidden_size, config.intermediate_size)
@@ -353,39 +349,35 @@ class TransducerEncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
     ) -> torch.Tensor:
+        # [NOTE}: wav2vec2 + bert encoder layer를 참고해서 만들었음.
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
 
         attention_residual = hidden_states
-        hidden_states = self.attention(
+        hidden_states, attn_weights, _ = self.attention(
             hidden_states,
             attention_mask,
             head_mask=head_mask,
             output_attentions=output_attentions,
             past_key_value=self_attn_past_key_value,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_attention_mask,
         )
+
         hidden_states = self.dropout(hidden_states[0])
         hidden_states = attention_residual + hidden_states
         hidden_states = self.layer_norm(hidden_states)
-        """
-            [NOTE]: 이 부분은 한번 확인할 것
-                    일단은 변수를 줄이기 위해 wav2vec2의 FFN을 따라함.
-            ffn_residual = hidden_states
-            hidden_states = ffn_residual + self.feed_forward(hidden_states)
-            hidden_states = self.final_layer_norm(hidden_states)
-        """
 
         hidden_states = self.layer_norm(hidden_states)
         hidden_states = hidden_states + self.feed_forward(hidden_states)
         hidden_states = self.final_layer_norm(hidden_states)
 
-        return hidden_states
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (attn_weights,)
+
+        return outputs
 
 
 # ======================================================
@@ -397,7 +389,7 @@ class TransducerDecoder(TransducerPretrainedModel):
         self.config = config
         self.is_decoder = True
 
-        if True:
+        if False:
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=config.hidden_size,
                 nhead=config.num_attention_heads,
@@ -412,20 +404,31 @@ class TransducerDecoder(TransducerPretrainedModel):
             self.encoder = nn.TransformerEncoder(encoder_layer, config.decoder_layers)
             self.head_size = config.num_attention_heads
         else:
-            encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
-            self.layers = nn.ModuleList(encoder_layers)
-
+            decoder_layers = [TransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
+            self.layers = nn.ModuleList(decoder_layers)
+            self.layerdrop = config.decoder_layerdrop
+        # [TODO]: absolute, relative positional embedding 구현하기
         self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.word_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
 
+        self.gradient_checkpointing = False
+        # Initialize weights and apply final processing
+        self.post_init()
+
     def _prepare_decoder_attention_mask(
         self,
-        attention_mask: torch.Tensor,
         input_shape: Tuple[int],
         inputs_embeds: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
         past_key_values_length: int = 0,
-    ):
+    ) -> torch.Tensor:
+        # [NOTE]: 원래 attention_mask는 Optional이 아니였음.
+        #         무조건 값이 들어오도록 만들었어야 했을 것 같지만
+        #         `attention_mask is not None` 로 된 구문을 봤을 때 단순 버그라 생각된다.
+        #         _prepare_decoder_attention_mask는 generate시 생성되는 문장 만큼 attention_mask 생성하기 위해
+        #         attention_mask가 들어오지 않는 경우에 mask를 생성하는 기능을 추가해 놓은 듯 하다.
+
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         combined_attention_mask = None
@@ -450,44 +453,97 @@ class TransducerDecoder(TransducerPretrainedModel):
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
+        head_mask: Optional[torch.Tensor] = None,
+        use_cache: Optional[bool] = None,
     ) -> Union[EncoderOutput, Tuple[Any]]:
-        input_len = labels.shape[1] if labels.dim() == 2 else labels.shape[0]
 
-        # [XXX]: 이 부분은 나중에 확인 필요
-        #         코드가 너무 길어서 나중에 수정될 수 있음
+        attentions_flag = output_attentions is not None
+        output_attentions = output_attentions if attentions_flag else self.config.output_attentions
+
+        output_hidden_flag = output_hidden_states is not None
+        output_hidden_states = output_hidden_states if output_hidden_flag else self.config.output_hidden_states
+
+        return_flag = return_dict is not None
+        return_dict = return_dict if return_flag else self.config.use_return_dict
 
         # [XXX]: 나중에 따로 모듈화 해야할 수도 있음
-        position_ids = self.position_ids[:, :input_len]
+        seq_length = labels.shape[1]
+        position_ids = self.position_ids[:, :seq_length]
         position_embed = self.position_embeddings(position_ids)
         word_embed = self.word_embedding(labels)
 
-        hidden_state = word_embed + position_embed
+        hidden_states = word_embed + position_embed
 
         label_shape = labels.shape
-        attention_mask = (
-            self._prepare_decoder_attention_mask(
-                attention_mask,
-                label_shape,
-                position_embed,
-            )
-            if self.training
-            else None
+        attention_mask = self._prepare_decoder_attention_mask(
+            attention_mask=attention_mask,
+            input_shape=label_shape,
+            inputs_embeds=position_embed,
         )
 
-        if True:
+        if False:
             if attention_mask is not None:
                 attention_mask = attention_mask.squeeze(1)
                 attention_mask = attention_mask.repeat(self.head_size, 1, 1)
                 attention_mask = attention_mask.bool()
-            hidden_state = self.encoder(hidden_state, attention_mask)
+            hidden_states = self.encoder(hidden_states, attention_mask)
+            all_attentions = None
+            encoder_states = None
         else:
-            for layer in self.layers:
-                hidden_state = layer(hidden_state, attention_mask)
+            # decoder layers
+            all_hidden_states = () if output_hidden_states else None
+            all_self_attns = () if output_attentions else None
+            next_decoder_cache = () if use_cache else None
+
+            encoder_states = () if output_hidden_states else None
+            all_attentions = () if output_attentions else None
+
+            for idx, decoder_layer in enumerate(self.layers):
+                if output_hidden_states:
+                    encoder_states = encoder_states + (hidden_states,)
+                # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+                dropout_probability = random.uniform(0, 1)
+                if self.training and (dropout_probability < self.layerdrop):  # skip the layer
+                    layer_outputs = (None, None)
+                else:
+                    if self.gradient_checkpointing and self.training:
+
+                        def create_custom_forward(module):
+                            def custom_forward(*inputs):
+                                return module(*inputs, output_attentions)
+
+                            return custom_forward
+
+                        layer_outputs = torch.utils.checkpoint.checkpoint(
+                            create_custom_forward(decoder_layer),
+                            hidden_states,
+                            attention_mask,
+                            (head_mask[idx] if head_mask is not None else None),
+                        )
+                    else:
+                        layer_outputs = decoder_layer(
+                            hidden_states,
+                            attention_mask,
+                            head_mask=(head_mask[idx] if head_mask is not None else None),
+                            output_attentions=output_attentions,
+                        )
+
+                    hidden_states = layer_outputs[0]
+
+                if output_attentions:
+                    all_attentions = all_attentions + (layer_outputs[1],)
+
+        if output_hidden_states:
+            encoder_states = encoder_states + (hidden_states,)
 
         if not return_dict:
-            return None
+            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
 
-        return EncoderOutput(hidden_state)
+        return DecoderOutput(
+            last_hidden_states=hidden_states,
+            decoder_attentions=all_attentions,
+            decoder_hidden_states=None,
+        )
 
 
 class TransducerEncoder(TransducerPretrainedModel):
@@ -515,16 +571,15 @@ class TransducerEncoder(TransducerPretrainedModel):
             self.encoder = nn.TransformerEncoder(encoder_layer, config.encoder_layers)
             self.head_size = config.num_attention_heads
         else:
-            self.test_embedding = nn.Embedding(config.position_embed_size, config.hidden_size)
-            self.test_ids = torch.arange(config.position_embed_size)
-
-            self.linear = nn.Linear(80, config.hidden_size)
-
+            config.position_embedding_type = "no"
             encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.encoder_layers)]
             self.layers = nn.ModuleList(encoder_layers)
-        # [TODO]: absolute, relative positional embedding 구현하기
+            self.layerdrop = config.encoder_layerdrop
+            self.gradient_checkpointing = False
         self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+
+        self.post_init()
 
     def _prepare_encoder_attention_mask(
         self,
@@ -629,17 +684,28 @@ class TransducerEncoder(TransducerPretrainedModel):
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
+        head_mask: Optional[torch.Tensor] = None,
     ) -> Union[EncoderOutput, Tuple[Any]]:
+
+        attentions_flag = output_attentions is not None
+        output_attentions = output_attentions if attentions_flag else self.config.output_attentions
+
+        output_hidden_flag = output_hidden_states is not None
+        output_hidden_states = output_hidden_states if output_hidden_flag else self.config.output_hidden_states
+
+        return_flag = return_dict is not None
+        return_dict = return_dict if return_flag else self.config.use_return_dict
 
         # [TODO]: attention_mask에 dtype 설정되도록 하기
         feature_shape = input_features.size()
         attention_mask = self._prepare_encoder_attention_mask(attention_mask, feature_shape)
 
+        time_seq = input_features.shape[1]
+        position_ids = self.position_ids[:, :time_seq]
+        position_vector = self.position_embeddings(position_ids)
+        hidden_states = input_features + position_vector
+
         if True:
-            time_seq = input_features.shape[1]
-            position_ids = self.position_ids[:, :time_seq]
-            position_vector = self.position_embeddings(position_ids)
-            hidden_state = input_features + position_vector
 
             if attention_mask is not None:
                 # pytorch transformer를 위해 만든 곳, pytorch transformer는 bsz * head_size임
@@ -648,15 +714,64 @@ class TransducerEncoder(TransducerPretrainedModel):
                 # [NOTE]: if full attention일 경우
                 # attention_mask = attention_mask.repeat(1, attention_mask.shape[2], 1)
 
-            hidden_state = self.encoder(hidden_state, attention_mask.bool())
+            hidden_states = self.encoder(hidden_states, attention_mask.bool())
+            attentions = None
         else:
-            for layer in self.layers:
-                hidden_state = layer(hidden_state, attention_mask)
+            encoder_states = () if output_hidden_states else None
+            all_attentions = () if output_attentions else None
+            if head_mask is not None:
+                if head_mask.size()[0] != (len(self.layers)):
+                    raise ValueError(
+                        f"The head_mask should be specified for {len(self.layers)} layers, but it is for"
+                        f" {head_mask.size()[0]}."
+                    )
+
+            for idx, encoder_layer in enumerate(self.layers):
+                if output_hidden_states:
+                    encoder_states = encoder_states + (hidden_states,)
+                # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+                dropout_probability = random.uniform(0, 1)
+                if self.training and (dropout_probability < self.layerdrop):  # skip the layer
+                    layer_outputs = (None, None)
+                else:
+                    if self.gradient_checkpointing and self.training:
+
+                        def create_custom_forward(module):
+                            def custom_forward(*inputs):
+                                return module(*inputs, output_attentions)
+
+                            return custom_forward
+
+                        layer_outputs = torch.utils.checkpoint.checkpoint(
+                            create_custom_forward(encoder_layer),
+                            hidden_states,
+                            attention_mask,
+                            (head_mask[idx] if head_mask is not None else None),
+                        )
+                    else:
+                        layer_outputs = encoder_layer(
+                            hidden_states,
+                            attention_mask,
+                            head_mask=(head_mask[idx] if head_mask is not None else None),
+                            output_attentions=output_attentions,
+                        )
+
+                    hidden_states = layer_outputs[0]
+
+                if output_attentions:
+                    attentions = all_attentions + (layer_outputs[1],)
+
+            if output_hidden_states:
+                encoder_states = encoder_states + (hidden_states,)
 
         if not return_dict:
             return None
 
-        return EncoderOutput(hidden_state)
+        return EncoderOutput(
+            last_hidden_states=hidden_states,
+            encoder_attentions=attentions,
+            encoder_hidden_states=None,
+        )
 
 
 class TransducerJoiner(nn.Module):
@@ -670,32 +785,32 @@ class TransducerJoiner(nn.Module):
 
     def forward(
         self,
-        audio_hiddens: torch.Tensor,
-        label_hiddens: torch.Tensor,
+        encoder_hiddens: torch.Tensor,
+        decoder_hiddens: torch.Tensor,
         return_dict: Optional[bool] = True,
     ) -> Union[JoinerOutput, Tuple[Any]]:
 
         # [TODO]: 나중에 concat test하기
-        if audio_hiddens.dim() == 3 and label_hiddens.dim() == 3:
-            audio_hiddens = audio_hiddens[:, :, None, :]
-            label_hiddens = label_hiddens[:, None, :, :]
+        if encoder_hiddens.dim() == 3 and decoder_hiddens.dim() == 3:
+            encoder_hiddens = encoder_hiddens[:, :, None, :]
+            decoder_hiddens = decoder_hiddens[:, None, :, :]
             # [NOTE]: huggingface의 attention_mask 생성에서 위와 같은 방법이 사용됨
             #         그리고 차원이 몇 차원인지 간접적으로 알려줄 수 있을 거라 생각해 사용함
 
-        audio_hiddens = self.audio_linear(audio_hiddens)
-        label_hiddens = self.label_linear(label_hiddens)
+        encoder_hiddens = self.audio_linear(encoder_hiddens)
+        decoder_hiddens = self.label_linear(decoder_hiddens)
 
-        joint_hiddens = audio_hiddens + label_hiddens
+        joint_hiddens = encoder_hiddens + decoder_hiddens
         joint_hiddens = self.tanh(joint_hiddens)
         joint_hiddens = self.dense(joint_hiddens)
 
         if not return_dict:
-            return (audio_hiddens, label_hiddens, joint_hiddens)
+            return (encoder_hiddens, decoder_hiddens, joint_hiddens)
 
         return JoinerOutput(
             logits=joint_hiddens,
-            audio_hidden=audio_hiddens,
-            label_hidden=label_hiddens,
+            encoder_hidden_states=encoder_hiddens,
+            decoder_hidden_states=decoder_hiddens,
         )
 
 
@@ -721,17 +836,28 @@ class TransducerModel(TransducerPretrainedModel):
         self,
         input_features: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        decoder_head_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         decoder_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[TransducerBaseModelOutput, Tuple[Any]]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        """
+        Transducer는 Seq2Seq와 비슷한 모델이지만 encoder, decoder가 Cross-Attention이 아닌 Self-attention으로 작동함.
+        이후 joiner가 cross attention과 비슷한 역할을 수행함. 이는 inference에서도 동일하게 동작함.
+        """
+
+        # [XXX]: 단순 indentation이 발생하는 게 싫어서 flag를 선언함. 나중에 수정해도 무관함
+        attentions_flag = output_attentions is not None
+        output_attentions = output_attentions if attentions_flag else self.config.output_attentions
+
+        output_hidden_flag = output_hidden_states is not None
+        output_hidden_states = output_hidden_states if output_hidden_flag else self.config.output_hidden_states
+
+        return_flag = return_dict is not None
+        return_dict = return_dict if return_flag else self.config.use_return_dict
 
         encoder_outputs = self.encoder(
             input_features,
@@ -740,7 +866,7 @@ class TransducerModel(TransducerPretrainedModel):
             output_hidden_states,
             return_dict,
         )
-        audio_hiddens = encoder_outputs.last_hidden_state
+        encoder_hiddens = encoder_outputs.last_hidden_states
 
         decoder_outputs = self.decoder(
             labels,
@@ -749,24 +875,26 @@ class TransducerModel(TransducerPretrainedModel):
             output_hidden_states,
             return_dict,
         )
-        label_hiddens = decoder_outputs.last_hidden_state
+        decoder_hiddens = decoder_outputs.last_hidden_states
 
-        joiner_outputs = self.joiner(audio_hiddens, label_hiddens, return_dict)
+        joiner_outputs = self.joiner(encoder_hiddens, decoder_hiddens, return_dict)
         hidden_states = joiner_outputs.logits
 
         if not return_dict:
             return (
-                (hidden_states, audio_hiddens, label_hiddens)
+                (hidden_states, encoder_hiddens, decoder_hiddens)
                 + encoder_outputs[1:]
                 + decoder_outputs[1:]
                 + joiner_outputs[1:]
             )
         return TransducerBaseModelOutput(
             logits=hidden_states,
-            audio_last_hidden_state=audio_hiddens,
-            label_last_hidden_state=label_hiddens,
-            audio_attentions=None,
-            label_attentions=None,
+            encoder_last_hidden_states=encoder_hiddens,
+            encoder_hidden_states=None,
+            encoder_attentions=None,
+            decoder_attentions=None,
+            decoder_last_hidden_states=decoder_hiddens,
+            decoder_hidden_states=None,
         )
 
 
@@ -797,6 +925,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         self,
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
         decoder_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
@@ -806,24 +935,29 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         feature_lengths: Optional[torch.Tensor] = None,
     ) -> Union[RNNTBaseOutput, Tuple[Any]]:
 
+        # [BUG]: DP에서는 동작할 수 없음. 아마 attention_mask단위로 계산하는 것 때문에 발생하는 문제인 듯 함.
+        #        max_length문제는 나중에 해결할 것
+
         # [NOTE]: attention_mask가 3차원으로 들어와도 정상적으로 작동하도록 고려함
         if attention_mask is not None:
-            if attention_mask.dim() == 3 and feature_lengths == None:
+            if attention_mask.dim() == 3 and feature_lengths is None:
                 # [TODO]: 나중에 영어로 수정할 것
                 raise ValueError("attention_mask가 3차원 일때 무조건 feature_lengths가 입력되어야 합니다!")
         if decoder_attention_mask is not None:
-            if decoder_attention_mask.dim() == 3 and label_lengths == None:
+            if decoder_attention_mask.dim() == 3 and label_lengths is None:
                 raise ValueError("decoder_attention_mask가 3차원 일 때 무조건 label_length가 입력되어야 합니다!")
 
         transducer_outputs = self.transducer(
-            input_features,
-            labels,
-            attention_mask,
-            decoder_attention_mask,
-            output_attentions,
-            output_hidden_states,
+            input_features=input_features,
+            attention_mask=attention_mask,
+            head_mask=head_mask,
+            labels=labels,
+            decoder_attention_mask=decoder_attention_mask,
+            output_hidden_states=output_hidden_states,
+            output_attentions=output_attentions,
             return_dict=return_dict,
         )
+
         logits = transducer_outputs.logits
         log_prob = self.log_softmax(logits)
 
@@ -831,13 +965,11 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         non_blank_labels = labels[:, 1:]
         # [XXX]: torchaudio의 rnn-t loss는 int32의 정수형만 받아들임
         #        이 if문은 부분은 나중에 수정될 수 있음
-        feature_lengths = feature_lengths if feature_lengths else attention_mask.sum(-1)
-        label_lengths = label_lengths if label_lengths else decoder_attention_mask.sum(-1)
+        feature_lengths = feature_lengths if feature_lengths else attention_mask.sum(-1, dtype=torch.int32)
+        label_lengths = label_lengths if label_lengths else decoder_attention_mask.sum(-1, dtype=torch.int32)
         label_lengths = label_lengths - 1
 
         non_blank_labels = non_blank_labels.to(torch.int32)
-        feature_lengths = feature_lengths.to(torch.int32)
-        label_lengths = label_lengths.to(torch.int32)
 
         loss = rnnt_loss(
             logits=log_prob,
@@ -850,21 +982,22 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         )
 
         # [TODO]: beamsearch 테스트를 위해 넣어둔 코드, 나중에 삭제할 것!
-        self.test_beam_search(transducer_outputs.audio_last_hidden_state[0])
+        # self.test_beam_search(transducer_outputs.audio_last_hidden_state[0])
         # [NOTE]: transformer-transducer는 메모리를 많이 차지하기 때문에 임시로 empty_cache를 진행함
         #         torch profiler를 이용해 값을 확인할 것
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
         if not return_dict:
             return None
+
         return RNNTBaseOutput(loss=loss, logits=logits)
 
     def prepare_inputs_for_generation(
         self,
         input_features: torch.Tensor,
-        labels: Optional[torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        decoder_attention_mask: Optional[torch.Tensor],
+        labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        decoder_attention_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         # 이 부분은 generate에서 어떻게 동작하는지 확인할 필요가 있음
         return {
@@ -881,8 +1014,6 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         logits_processor: Optional[LogitsProcessorList] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         max_length: Optional[int] = None,
-        pad_token_id: Optional[int] = None,
-        eos_token_id: Optional[int] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         output_scores: Optional[bool] = None,
@@ -891,8 +1022,12 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         **model_kwargs,
     ) -> Union[GreedySearchOutput, torch.LongTensor]:
 
+        # [TODO]: input_features라는 이름은 나중에 바꿀 것
+
+        # [NOTE]: logits_processor
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
         stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
+
         if max_length is not None:
             warnings.warn(
                 "`max_length` is deprecated in this function, use"
@@ -900,8 +1035,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 UserWarning,
             )
             stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
-        pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
-        eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
+
         output_scores = output_scores if output_scores is not None else self.config.output_scores
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -917,19 +1051,127 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         cross_attentions = () if (return_dict_in_generate and output_attentions) else None
         decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
 
-        # ====================
+        # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
+        if return_dict_in_generate and self.config.is_encoder_decoder:
+            encoder_attentions = model_kwargs["encoder_outputs"].get("attentions") if output_attentions else None
+            encoder_hidden_states = (
+                model_kwargs["encoder_outputs"].get("hidden_states") if output_hidden_states else None
+            )
 
-        encoder_state = encoder_outputs.last_hidden_state
-        blank_id = self.config.blank_id
+        # keep track of which sequences are already finished
+        unfinished_sequences = input_features.new(input_features.shape[0]).fill_(1)
+
+        this_peer_finished = False  # used by synced_gpus only
+
+        # ====================
 
         decoder = self.get_decoder()
         joiner = self.get_joiner()
 
         decoder_outputs = decoder(input_features)
-        decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
-
+        decoder_state = decoder_outputs.last_hidden_states
+        encoder_state = encoder_outputs.last_hidden_states
+        feature_length = encoder_state.shape[1] - 1
+        # [NOTE]: 모든 index는 0번에서 시작하기 때문에 index에 맞추기 위해서는 1을 제거할 필요가 있다.
+        repeat_count = 0
+        decoding_list = list()
         state_iter = enumerate(zip(encoder_state, decoder_state))
+        for batch_idx, (audio_logits, decoder_state) in state_iter:
+            time_idx = 0
+            repeat_max = 20
+            gen_sentence = input_features[batch_idx]
+
+            while True:
+                if synced_gpus:
+                    # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
+                    # The following logic allows an early break if all peers finished generating their sequence
+                    this_peer_finished_flag = torch.tensor(0.0 if this_peer_finished else 1.0, device=self.device)
+                    # send 0.0 if we finished, 1.0 otherwise
+                    dist.all_reduce(this_peer_finished_flag, op=dist.ReduceOp.SUM)
+                    # did all peers finish? the reduced sum will be 0.0 then
+                    if this_peer_finished_flag.item() == 0.0:
+                        break
+
+                if time_idx == feature_length or len(gen_sentence) == 512:
+                    break
+
+                current_state = audio_logits[time_idx].view(-1)
+                decoder_state = decoder_state.view(-1)
+
+                joiner_outputs = joiner(current_state, decoder_state)
+                next_token_logits = joiner_outputs.logits
+
+                next_tokens_scores = logits_processor(gen_sentence, next_token_logits)
+                next_tokens_scores = torch.log_softmax(next_tokens_scores, dim=-1)
+
+                next_token = torch.argmax(next_tokens_scores)
+                next_token_score = next_tokens_scores[next_token]
+
+                if next_token == self.blank_id or repeat_count == repeat_max:
+                    time_idx += 1
+                    repeat_count = 0
+                    continue
+
+                if return_dict_in_generate:
+                    if output_scores:
+                        scores += (next_token_score,)
+                    if output_attentions:
+                        decoder_attentions += (
+                            (decoder_outputs.decoder_attentions,)
+                            if self.config.is_encoder_decoder
+                            else (decoder_outputs.attentions,)
+                        )
+                        if self.config.is_encoder_decoder:
+                            cross_attentions += (decoder_outputs.cross_attentions,)
+                    if output_hidden_states:
+                        decoder_hidden_states += (
+                            (decoder_outputs.decoder_hidden_states,)
+                            if self.config.is_encoder_decoder
+                            else (decoder_outputs.hidden_states,)
+                        )
+
+                gen_sentence = torch.cat([gen_sentence, next_token[None]], dim=-1)
+
+                decoder_outputs = decoder(gen_sentence[1:].unsqueeze(0))
+                decoder_state = decoder_outputs.last_hidden_states[:, -1, :]
+                repeat_count += 1
+            decoding_list.append(gen_sentence)
+
+        # [NOTE]: 일반적인 generate의 greedy search의 경우 model이 batch_size만큼 하나씩 예측해 나가기 때문에 cocnat및 pad문제에서 자유롭다.
+        #         하지만 streaming 모델의 경우 위와 같은 방법으로 예측할 수 없기 때문에 별도로 pad를 붙여줘야 한다.
+        inner_max_length = max([len(sentence) for sentence in decoding_list])
+        pad_shape = (0, inner_max_length)
+        # [NOTE]: 계산의 간소화를 위해 슬라이싱을 이용해 잘라내도록 한다.
+        decoding_list = [F.pad(tensor, pad_shape)[:inner_max_length] for tensor in decoding_list]
+        input_features = torch.stack(decoding_list)
+
+        if return_dict_in_generate:
+            if self.config.is_encoder_decoder:
+                return GreedySearchEncoderDecoderOutput(
+                    sequences=input_features,
+                    scores=scores,
+                    encoder_attentions=encoder_attentions,
+                    encoder_hidden_states=encoder_hidden_states,
+                    decoder_attentions=decoder_attentions,
+                    cross_attentions=cross_attentions,
+                    decoder_hidden_states=decoder_hidden_states,
+                )
+            else:
+                return GreedySearchDecoderOnlyOutput(
+                    sequences=input_features,
+                    scores=scores,
+                    attentions=decoder_attentions,
+                    hidden_states=decoder_hidden_states,
+                )
+        else:
+            return input_features
+
+
+"""
+    비교를 위한 greedy search
+
         result_list = list()
+        state_iter = enumerate(zip(encoder_state, decoder_state))
         for batch_idx, (audio_logits, decoder_state) in state_iter:
             # decoder_outputs = decoder(start_token)
             # decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
@@ -940,11 +1182,11 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 current_state = audio_logits[time_idx]
                 # [NOTE]: just output 1d tensor
                 joint_outputs = joiner(current_state.view(-1), decoder_state.view(-1))
-                joint_state = joint_outputs.hidden_state
+                joint_state = joint_outputs.logits
 
                 log_prob = joint_state.log_softmax(dim=-1)
                 token_id = log_prob.argmax(dim=-0)
-                if blank_id not in token_id:
+                if self.blank_id not in token_id:
                     token_id = token_id.unsqueeze(0)
                     concat_frame = [reuslt_ids, token_id]
                     reuslt_ids = torch.concat(concat_frame, dim=-1)
@@ -956,98 +1198,6 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
             reuslt_ids = torch.concat([reuslt_ids[:max_length], pad])
 
             result_list.append(reuslt_ids)
-
         return torch.stack(result_list)[:, 1:]
 
-    def test_beam_search(self, encoder_state) -> None:
-        beam_width = 5
-        decoder = self.get_decoder()
-        joiner = self.get_joiner()
-        lengths = encoder_state.shape[0]
-
-        first = True
-        device = torch.device("cuda" if encoder_state.is_cuda else "cpu")
-
-        token_list = []  # len=beam_width
-        probability = np.zeros((beam_width,), dtype=float)
-        token_child_list = []  # len=beam_width**2
-        probability_child = np.zeros((beam_width, beam_width), dtype=float)
-
-        # [NOTE]: beam_width 만큼의 list를 만든다음 그 리스트에 값들을 차례대로 넣어가며 예측한다.
-        for i in range(beam_width):
-            token_list.append([0])
-        for i in range(beam_width):
-            token_child_list.append([])
-            for j in range(beam_width):
-                token_child_list[i].append([0])
-
-        # 1 배치 단위의 데이터 들어와야 함
-        for t in range(lengths):
-            max_index = probability.argmax()  # 첫 시작에는 0이 출력됨
-            token = torch.tensor([token_list[max_index]], dtype=torch.long).to(device)  # max_index를 왜 출력하는지 이해안됨
-
-            decoder_outputs = decoder(token)
-            decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
-
-            joiner_outputs = joiner(encoder_state[t].view(-1), decoder_state.view(-1))
-            logits = joiner_outputs.logits
-            out = logits.softmax(dim=0).detach()
-
-            pred_max = torch.argmax(out, dim=0)
-            pred_max = int(pred_max.item())
-            # 이 윗 부분은 time-index의 blank를 예측하기 위해서 만들어 졌음.
-            # blank 값이 아닌 time index를 만났다면 그 이후부터 beam-search를 진행한다.
-            if pred_max != 0:  # y축, rnn-t loss그림에서의 u에 해당됨
-                for token_index in range(len(token_list)):
-                    # RNN-T의 u(반복횟수를) beam_width만큼 진행시키는 듯
-                    token = torch.tensor([token_list[token_index]], dtype=torch.long).to(device)
-                    # token_list가 일종의 root-node인건가?
-                    decoder_outputs = decoder(token)
-                    decoder_state = decoder_outputs.last_hidden_state[:, -1, :]  # last_hidden_state를 얻기 위해서 -1를 하는 듯
-
-                    joiner_outputs = joiner(encoder_state[t].view(-1), decoder_state.view(-1))
-                    # deepcopy 문제를 피하기 위해서 view를 진행함.
-                    logits = joiner_outputs.logits
-                    out = logits.softmax(dim=0).detach()  # 1차원 배
-
-                    values, indices = torch.topk(out, k=beam_width + 1, dim=0)  # 아마 1을 추가한 이유는 blank때문인 듯
-                    # topk는 주어진 원소 중에서 k개의 가장 큰 값들을 추출하는 함수, 이떄 큰 값 순으로 정렬된다.
-                    # ex): k=3, [0, 1, 2, 3, 4, 5] > [5, 4, 3]
-                    # 위와 같은 결과가 나오기 때문에 if first문 에서 모든 행에서 첫 열의 값만 가져간다.
-
-                    values = values.tolist()
-                    indices = indices.tolist()
-
-                    if 0 in indices:  # 첫 시작 떄 token에 있는 blank 값을 삭제함.
-                        zero_index = indices.index(0)  # 매개변수로 건낸 값이 잇는 index위치 값을 반환함
-                        # blank값이 하나만 나온다는 확신이 있어서 하나만 제거하나?
-                        # 2개 3개 나올 수 있는거 아닌기?
-                        indices.pop(zero_index)
-                        values.pop(zero_index)
-                    else:
-                        indices.pop(-1)
-                        values.pop(-1)
-                        # topk시 blank값을 고려해 beam_width + 1을 하기 때문에 opk 6개의 값이 나오게 된다.
-                    if first:
-                        for i in range(len(indices)):
-                            token_child_list[i][token_index].append(indices[i])
-                            probability_child[:, token_index] = np.log(values)  # 최초로 log_prob을 추가시키는 곳
-                    else:
-                        for i in range(len(indices)):
-                            token_child_list[token_index][i].append(indices[i])
-                            probability_child[token_index] = probability[token_index] + np.log(values)
-                if first:
-                    first = False
-                    for i in range(beam_width):
-                        token_list[i] = copy.deepcopy(token_child_list[i][0])  # 첫 루트 노드에다가 누적 화률 값을 입력하는 곳
-                        probability[i] = copy.deepcopy(probability_child[i, 0])
-                else:
-                    top_k_index = heapq.nlargest(beam_width, range(beam_width**2), key=probability_child.take)
-                    for i in range(len(top_k_index)):
-                        index = top_k_index[i]
-                        probability[i] = copy.deepcopy(probability_child[index // beam_width, index % beam_width])
-                        token_list[i] = copy.deepcopy(token_child_list[index // beam_width][index % beam_width])
-
-        max_index = probability.argmax()
-        token_list = token_list[max_index]
-        return token_list[1:]
+"""

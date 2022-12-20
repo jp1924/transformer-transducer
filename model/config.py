@@ -7,7 +7,9 @@ class TransformerTransducerConfig(PretrainedConfig):
         vocab_size=None,
         initializer_range=0.02,
         encoder_layers=18,
+        encoder_layerdrop=0.0,
         decoder_layers=2,
+        decoder_layerdrop=0.0,
         hidden_size=320,
         hidden_dropout=0.03,
         hidden_act="gelu",
@@ -28,7 +30,9 @@ class TransformerTransducerConfig(PretrainedConfig):
     ) -> None:
         super().__init__(**kwargs)
         self.encoder_layers = encoder_layers
+        self.encoder_layerdrop = encoder_layerdrop
         self.decoder_layers = decoder_layers
+        self.decoder_layerdrop = decoder_layerdrop
 
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -58,7 +62,7 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.bos_token_id = 1
         self.eos_token_id = 2
         self.pad_token_id = 0
-        self.pruned_heads = False
+        self.pruned_heads = {}
         self.output_attentions = False
         self.output_hidden_states = False
         self.is_encoder_decoder = True
@@ -67,7 +71,6 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.early_stopping = True
         self.length_penalty = 1.0
 
-        # for generate
         self.max_length = 512
         self.min_length = 1
         self.do_sample = False

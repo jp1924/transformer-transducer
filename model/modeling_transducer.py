@@ -1,9 +1,11 @@
+import random
 import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torchaudio.functional import rnnt_loss
@@ -11,18 +13,15 @@ from transformers import PretrainedConfig
 from transformers.activations import ACT2FN
 from transformers.generation_logits_process import LogitsProcessorList
 from transformers.generation_stopping_criteria import StoppingCriteriaList, validate_stopping_criteria
-from transformers.modeling_utils import PreTrainedModel
 from transformers.generation_utils import (
     GreedySearchDecoderOnlyOutput,
     GreedySearchEncoderDecoderOutput,
     GreedySearchOutput,
 )
-from transformers.utils import ModelOutput
-from .config import TransformerTransducerConfig
-import torch.distributed as dist
-from transformers.utils import logging
-import random
+from transformers.modeling_utils import PreTrainedModel
+from transformers.utils import ModelOutput, logging
 
+from .config import TransformerTransducerConfig
 
 logger = logging.get_logger(__name__)
 
@@ -104,14 +103,14 @@ class RNNTBaseOutput(ModelOutput):
 # =====================================================
 
 
-class TransducerPretrainedModel(PreTrainedModel):
+class TransformerTransducerPretrainedModel(PreTrainedModel):
     config_class = TransformerTransducerConfig
     base_model_prefix = "transformertransducer"
     main_input_name = "input_features"
     _keys_to_ignore_on_load_missing = [r"position_ids"]
     supports_gradient_checkpointing = True
 
-    def _init_weights(self, module):
+    def _init_weights(self, module) -> None:
         """Initialize the weights"""
         if isinstance(module, nn.Linear):
             # Slightly different from the TF version which uses truncated_normal for initialization
@@ -127,13 +126,13 @@ class TransducerPretrainedModel(PreTrainedModel):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
-    def _set_gradient_checkpointing(self, module, value=False):
-        if isinstance(module, TransducerEncoderLayer):
+    def _set_gradient_checkpointing(self, module, value=False) -> None:
+        if isinstance(module, TransformerTransducerEncoderLayer):
             module.gradient_checkpointing = value
 
 
-class TransducerSelfAttention(nn.Module):
-    def __init__(self, config: PretrainedConfig, position_embedding_type=None):
+class TransformerTransducerSelfAttention(nn.Module):
+    def __init__(self, config: PretrainedConfig, position_embedding_type=None) -> None:
         super().__init__()
         # [NOTE]: BART attention layer를 참고해서 만들었다.
         #         이유: Wav2Vec2도 BART attention을 참고해서 만들었기 때문에
@@ -307,8 +306,8 @@ class TransducerSelfAttention(nn.Module):
         return attn_output, attn_weights_reshaped, past_key_value
 
 
-class TransducerFeedForward(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+class TransformerTransducerFeedForward(nn.Module):
+    def __init__(self, config: PretrainedConfig) -> None:
         super().__init__()
         # [NOTE]: Wav2Vec2를 참고해서 만들었음.
         self.intermediate_dropout = nn.Dropout(config.activation_dropout)
@@ -322,7 +321,7 @@ class TransducerFeedForward(nn.Module):
         self.ffn_dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.ffn_dropout = nn.Dropout(config.hidden_dropout)
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.intermediate_dense(hidden_states)
         hidden_states = self.act_fn(hidden_states)
         hidden_states = self.intermediate_dropout(hidden_states)
@@ -333,12 +332,12 @@ class TransducerFeedForward(nn.Module):
         return hidden_states
 
 
-class TransducerEncoderLayer(nn.Module):
+class TransformerTransducerEncoderLayer(nn.Module):
     def __init__(self, config: PretrainedConfig) -> None:
         super().__init__()
 
-        self.attention = TransducerSelfAttention(config)
-        self.feed_forward = TransducerFeedForward(config)
+        self.attention = TransformerTransducerSelfAttention(config)
+        self.feed_forward = TransformerTransducerFeedForward(config)
 
         self.dropout = nn.Dropout(config.hidden_dropout)
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -351,7 +350,7 @@ class TransducerEncoderLayer(nn.Module):
         head_mask: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor]:
         # [NOTE}: wav2vec2 + bert encoder layer를 참고해서 만들었음.
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
 
@@ -363,8 +362,9 @@ class TransducerEncoderLayer(nn.Module):
             output_attentions=output_attentions,
             past_key_value=self_attn_past_key_value,
         )
+        hidden_states = hidden_states[0]
 
-        hidden_states = self.dropout(hidden_states[0])
+        hidden_states = self.dropout(hidden_states)
         hidden_states = attention_residual + hidden_states
         hidden_states = self.layer_norm(hidden_states)
 
@@ -383,9 +383,9 @@ class TransducerEncoderLayer(nn.Module):
 # ======================================================
 
 
-class TransducerDecoder(TransducerPretrainedModel):
+class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
-        super(TransducerPretrainedModel, self).__init__(config)
+        super(TransformerTransducerPretrainedModel, self).__init__(config)
         self.config = config
         self.is_decoder = True
 
@@ -404,7 +404,7 @@ class TransducerDecoder(TransducerPretrainedModel):
             self.encoder = nn.TransformerEncoder(encoder_layer, config.decoder_layers)
             self.head_size = config.num_attention_heads
         else:
-            decoder_layers = [TransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
+            decoder_layers = [TransformerTransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
             self.layers = nn.ModuleList(decoder_layers)
             self.layerdrop = config.decoder_layerdrop
         # [TODO]: absolute, relative positional embedding 구현하기
@@ -546,9 +546,9 @@ class TransducerDecoder(TransducerPretrainedModel):
         )
 
 
-class TransducerEncoder(TransducerPretrainedModel):
+class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
-        super(TransducerPretrainedModel, self).__init__(config)
+        super(TransformerTransducerPretrainedModel, self).__init__(config)
         self.config = config
         self.attention_type = self.config.attention_type
 
@@ -572,7 +572,7 @@ class TransducerEncoder(TransducerPretrainedModel):
             self.head_size = config.num_attention_heads
         else:
             config.position_embedding_type = "no"
-            encoder_layers = [TransducerEncoderLayer(config) for _ in range(config.encoder_layers)]
+            encoder_layers = [TransformerTransducerEncoderLayer(config) for _ in range(config.encoder_layers)]
             self.layers = nn.ModuleList(encoder_layers)
             self.layerdrop = config.encoder_layerdrop
             self.gradient_checkpointing = False
@@ -774,7 +774,7 @@ class TransducerEncoder(TransducerPretrainedModel):
         )
 
 
-class TransducerJoiner(nn.Module):
+class TransformerTransducerJoiner(nn.Module):
     def __init__(self, config: PretrainedConfig) -> None:
         super().__init__()
 
@@ -814,14 +814,14 @@ class TransducerJoiner(nn.Module):
         )
 
 
-class TransducerModel(TransducerPretrainedModel):
+class TransducerModel(TransformerTransducerPretrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
-        super(TransducerPretrainedModel, self).__init__(config)
+        super(TransformerTransducerPretrainedModel, self).__init__(config)
         self.config = config
 
-        self.encoder = TransducerEncoder(config)
-        self.decoder = TransducerDecoder(config)
-        self.joiner = TransducerJoiner(config)
+        self.encoder = TransformerTransducerEncoder(config)
+        self.decoder = TransformerTransducerDecoder(config)
+        self.joiner = TransformerTransducerJoiner(config)
 
     def get_encoder(self) -> nn.Module:
         return self.encoder
@@ -898,7 +898,7 @@ class TransducerModel(TransducerPretrainedModel):
         )
 
 
-class TransformerTranducerForRNNT(TransducerPretrainedModel):
+class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
         super().__init__(config)
         self.config = config
@@ -1078,7 +1078,7 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
         state_iter = enumerate(zip(encoder_state, decoder_state))
         for batch_idx, (audio_logits, decoder_state) in state_iter:
             time_idx = 0
-            repeat_max = 20
+            repeat_max = 5
             gen_sentence = input_features[batch_idx]
 
             while True:
@@ -1165,39 +1165,3 @@ class TransformerTranducerForRNNT(TransducerPretrainedModel):
                 )
         else:
             return input_features
-
-
-"""
-    비교를 위한 greedy search
-
-        result_list = list()
-        state_iter = enumerate(zip(encoder_state, decoder_state))
-        for batch_idx, (audio_logits, decoder_state) in state_iter:
-            # decoder_outputs = decoder(start_token)
-            # decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
-            time_seq = audio_logits.shape[0]
-            reuslt_ids = input_features[batch_idx]
-
-            for time_idx in range(time_seq):
-                current_state = audio_logits[time_idx]
-                # [NOTE]: just output 1d tensor
-                joint_outputs = joiner(current_state.view(-1), decoder_state.view(-1))
-                joint_state = joint_outputs.logits
-
-                log_prob = joint_state.log_softmax(dim=-1)
-                token_id = log_prob.argmax(dim=-0)
-                if self.blank_id not in token_id:
-                    token_id = token_id.unsqueeze(0)
-                    concat_frame = [reuslt_ids, token_id]
-                    reuslt_ids = torch.concat(concat_frame, dim=-1)
-
-                    decoder_outputs = decoder(reuslt_ids.unsqueeze(0)[:, 1:])
-                    decoder_state = decoder_outputs.last_hidden_state[:, -1, :]
-            max_length = 511
-            pad = torch.zeros(max_length - len(reuslt_ids[:max_length]), device=reuslt_ids.device)
-            reuslt_ids = torch.concat([reuslt_ids[:max_length], pad])
-
-            result_list.append(reuslt_ids)
-        return torch.stack(result_list)[:, 1:]
-
-"""

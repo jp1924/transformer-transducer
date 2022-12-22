@@ -1,14 +1,16 @@
 import math
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Union, Any, Callable
 
 import numpy as np
+from numpy.fft import fft
 import torch
 
 from transformers.file_utils import is_torchaudio_available
 
 
 if is_torchaudio_available():
-    from torchaudio.transforms import MelSpectrogram
+    from torchaudio.transforms import MelSpectrogram, Spectrogram
+    import torchaudio.functional as F
 
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
@@ -16,52 +18,81 @@ from transformers.utils import PaddingStrategy, TensorType, logging
 
 
 logger = logging.get_logger(__name__)
+
 DECIBEL = 2 * 20 * math.log10(torch.iinfo(torch.int16).max)
 GAIN = pow(10, 0.05 * DECIBEL)
 
-
+# [NOTE]: copied from whisper extractor
 class TransducerFeatureExtractor(SequenceFeatureExtractor):
-
     model_input_names = ["input_features", "attention_mask"]
 
     def __init__(
         self,
-        feature_size: int,
-        sampling_rate: int,
-        padding_value: float,
-        stack: int = None,
-        stride: int = None,
+        feature_size: int = 80,
+        sampling_rate: int = 16000,
+        hop_length: int = 160,
+        chunk_length: int = 30,
+        n_fft: int = 400,
+        power: int = None,
+        window_fn: Callable = None,
+        min_frequency: float = None,
+        max_frequency: float = None,
+        stack: Optional[int] = 4,  # value from transformer-transducer paper
+        stride: Optional[int] = 3,  # value from transformer-transducer paper
+        padding_value: float = 0.0,
+        return_attention_mask: bool = False,  # pad inputs to max length with silence token (zero) and no attention mask
         **kwargs,
-    ) -> None:
-        super().__init__(feature_size, sampling_rate, padding_value, **kwargs)
+    ):
+        super().__init__(
+            feature_size=feature_size,
+            sampling_rate=sampling_rate,
+            padding_value=padding_value,
+            return_attention_mask=return_attention_mask,
+            **kwargs,
+        )
+        # [NOTE]: for Log-MelSpectrogram
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.chunk_length = chunk_length
+        self.n_samples = chunk_length * sampling_rate
+        self.nb_max_frames = self.n_samples // hop_length
+        self.sampling_rate = sampling_rate
+        self.mel_filters = self.get_mel_filters(sampling_rate, n_fft, n_mels=feature_size)
 
-        # [NOTE]: 굳이 stride, stack를 init에 추가한 이유,
-        #         init에 있는 값들은 한번 지정하면 이후에 변경하는 일이 없다. stride나 stack도 한번 설정하면 변경할 일이 없기 때문에 init에 놔뒀다.
-        if stride and stack:
-            assert stack > stride, "stride must be small stack_size, please set correct value"
-            self.stack = stack
-            self.stride = stride
+        # np.hanning(self.n_fft + 1)[:-1]애서 (self.n_fft + 1)[:-1]를 하는 이유를 모르겠음.
+        # 만약 n_fft가 400이라 했을 때 + 1 를 하는 건 window_length를 401개의 window값을 생성한다는 소리
+        # 근데 거기서 다시 [:-1]를 하는게 이해가 안됨. 값의 scale를 낮추는 역할을 하는 건가/
 
-    @staticmethod
-    def piecewise_linear_log(features: torch.FloatTensor):
-        features[features > math.e] = torch.log(features[features > math.e])
-        features[features <= math.e] = features[features <= math.e] / math.e
-        return features
+        # window = np.hanning(self.n_fft + 1)[:-1]
+        self.window = np.hanning(self.n_fft)
 
-    def extract_features(self, waveform: np.ndarray) -> np.ndarray:
-        """
-        Extract the mel spectrogram features and normalize them
-        """
-        waveform = torch.tensor(waveform)
-        features = self.mel_transform(waveform)
-        features = features.transpose(1, 0)
-        features = self.piecewise_linear_log(features * GAIN)
-        features = (features - self.global_mean) * self.global_invstddev
-        features = features.numpy()
+        if is_torchaudio_available():
+            self.window_fn: torch.Tensor = lambda x: torch.tensor(np.hanning(x), dtype=torch.float32)
 
-        return features
+            self.mel_transform = MelSpectrogram(
+                n_fft=self.n_fft,
+                n_mels=self.feature_size,
+                sample_rate=self.sampling_rate,
+                hop_length=self.hop_length,
+                window_fn=self.window_fn,
+                pad_mode="reflect",
+                center=True,
+            )
+            self.spectrogram = Spectrogram(
+                n_fft=self.n_fft,
+                hop_length=self.hop_length,
+                window_fn=self.window_fn,
+                pad_mode="reflect",
+                center=True,
+            )
 
-    # def mask_chunking(self, attention_mask)
+            F.melscale_fbanks
+
+        # [NOTE]: for compression
+        self.stack = stack
+        self.stride = stride
+
+        assert self.stack is not None or self.stride is not None, "windowing이 정상적으로 작동하지 않습니다!"
 
     def compress_features(self, features: Union[List[np.ndarray], List["mel"], np.ndarray]) -> List[Any]:
         if not isinstance(features, list):
@@ -83,10 +114,13 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
 
         mel_store = list()
         # [TODO]: left, right context하고 data전처리 간의 어떤 연관이 있는지 모르겠다.
-        for step in range(self.stack):
-            indices = [step + idx for idx in range(0, (time_steps - step), self.stride)]
+        for stack_num in range(self.stack):
+            idx_iter = range(0, (time_steps - stack_num), self.stride)
+            indices = [stack_num + idx for idx in idx_iter]
+
             features = mel_feature[indices]
             pad_width = ((0, expected_len - features.shape[0]), (0, 0))
+            # 더 간단한 방법이 있지만 그렇게 하기에는 너무 대충한 느낌이 든다.
             features = np.pad(features, pad_width)
 
             mel_store.append(features)
@@ -94,41 +128,185 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         padded_feature = np.concatenate(mel_store, axis=1)
         return padded_feature
 
+    def piecewise_linear_log(features):
+        features[features > math.e] = torch.log(features[features > math.e])
+        features[features <= math.e] = features[features <= math.e] / math.e
+        return features
+
+    def extract_features(self, waveform: torch.Tensor) -> np.ndarray:
+        """
+        Extract the mel spectrogram features and normalize them
+        """
+        features = self.mel_transform(waveform)
+        features = features.transpose(1, 0)
+
+        features = self.piecewise_linear_log((features * GAIN))
+        features = (features - self.global_mean) * self.global_invstddev
+        features = features.numpy()
+
+        return features
+
+    def get_mel_filters(self, sr, n_fft, n_mels=128, dtype=np.float32):
+        # Initialize the weights
+
+        # htk가 아닌 slaney로 진행함.
+
+        n_mels = int(n_mels)
+        weights = np.zeros((n_mels, int(1 + n_fft // 2)), dtype=dtype)
+
+        # Center freqs of each FFT bin
+        fftfreqs = np.fft.rfftfreq(n=n_fft, d=1.0 / sr)
+
+        # 'Center freqs' of mel bands - uniformly spaced between limits
+        min_mel = 0.0
+        max_mel = 45.245640471924965
+
+        mels = np.linspace(min_mel, max_mel, n_mels + 2)
+        mels = np.asanyarray(mels)
+
+        # Fill in the linear scale
+        f_min = 0.0
+        f_sp = 200.0 / 3
+        freqs = f_min + f_sp * mels
+
+        # And now the nonlinear scale
+        min_log_hz = 1000.0  # beginning of log region (Hz)
+        min_log_mel = (min_log_hz - f_min) / f_sp  # same (Mels)
+        logstep = np.log(6.4) / 27.0  # step size for log region
+
+        # If we have vector data, vectorize
+        log_t = mels >= min_log_mel
+        freqs[log_t] = min_log_hz * np.exp(logstep * (mels[log_t] - min_log_mel))
+
+        mel_f = freqs
+
+        fdiff = np.diff(mel_f)
+        ramps = np.subtract.outer(mel_f, fftfreqs)
+
+        for i in range(n_mels):
+            # lower and upper slopes for all bins
+            lower = -ramps[i] / fdiff[i]
+            upper = ramps[i + 2] / fdiff[i + 1]
+
+            # .. then intersect them with each other and zero
+            weights[i] = np.maximum(0, np.minimum(lower, upper))
+
+        # Slaney-style mel is scaled to be approx constant energy per channel
+        enorm = 2.0 / (mel_f[2 : n_mels + 2] - mel_f[:n_mels])
+        weights *= enorm[:, np.newaxis]
+
+        return weights
+
+    def fram_wave(self, waveform, center=True):
+        """
+        Transform a raw waveform into a list of smaller waveforms. The window length defines how much of the signal is
+        contain in each frame (smalle waveform), while the hope length defines the step between the beginning of each
+        new frame.
+
+        Centering is done by reflecting the waveform which is first centered around `frame_idx * hop_length`.
+        """
+        frames = []
+        for i in range(0, waveform.shape[0] + 1, self.hop_length):
+            half_window = (self.n_fft - 1) // 2 + 1
+            # half_window = (self.n_fft) // 2 + 1
+
+            if center:
+                start = i - half_window if i > half_window else 0
+                end = i + half_window if i < waveform.shape[0] - half_window else waveform.shape[0]
+
+                frame = waveform[start:end]
+
+                if start == 0:
+                    padd_width = (-i + half_window, 0)
+                    frame = np.pad(frame, pad_width=padd_width, mode="reflect")
+
+                elif end == waveform.shape[0]:
+                    padd_width = (0, (i - waveform.shape[0] + half_window))
+                    frame = np.pad(frame, pad_width=padd_width, mode="reflect")
+
+            else:
+                frame = waveform[i : i + self.n_fft]
+                frame_width = frame.shape[0]
+                if frame_width < waveform.shape[0]:
+                    frame = np.lib.pad(
+                        frame, pad_width=(0, self.n_fft - frame_width), mode="constant", constant_values=0
+                    )
+
+            frames.append(frame)
+        return np.stack(frames, 0)
+
+    def stft(self, frames, window):
+        """
+        Calculates the complex Short-Time Fourier Transform (STFT) of the given framed signal. Should give the same
+        results as `torch.stft`.
+        """
+        frame_size = frames.shape[1]
+        fft_size = self.n_fft
+
+        if fft_size is None:
+            fft_size = frame_size
+
+        if fft_size < frame_size:
+            raise ValueError("FFT size must greater or equal the frame size")
+        # number of FFT bins to store
+        num_fft_bins = (fft_size >> 1) + 1
+
+        data = np.empty((len(frames), num_fft_bins), dtype=np.complex64)
+        fft_signal = np.zeros(fft_size)
+
+        for f, frame in enumerate(frames):
+            if window is not None:
+                np.multiply(frame, window, out=fft_signal[:frame_size])
+            else:
+                fft_signal[:frame_size] = frame
+            data[f] = fft(fft_signal, axis=0)[:num_fft_bins]
+        return data.T
+
+    def _np_extract_fbank_features(self, waveform: np.array) -> np.ndarray:
+        """
+        Compute the log-Mel spectrogram of the provided audio, gives similar results whisper's original torch
+        implementation with 1e-5 tolerance.
+        """
+        filters = self.mel_filters
+        window = np.hanning(self.n_fft + 1)[:-1]
+
+        # [NOTE]: Mel-Spectrogram
+        frames = self.fram_wave(waveform)
+        stft = self.stft(frames, window=window)
+        magnitudes = np.abs(stft[:, :-1]) ** 2
+        mel_spec = filters @ magnitudes
+
+        # [NOTE]: Mel-Filter
+        log_spec = np.log10(np.clip(mel_spec, a_min=1e-10, a_max=None))
+        log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
+
+        # [NOTE]: log scale
+        log_spec = (log_spec + 4.0) / 4.0
+
+        return log_spec
+
     def __call__(
         self,
         raw_speech: Union[np.ndarray, List[float], List[np.ndarray], List[List[float]]],
-        padding: Union[bool, str, PaddingStrategy] = False,
-        max_length: Optional[int] = None,
-        truncation: bool = False,
-        windowing: bool = False,
+        truncation: bool = True,
         pad_to_multiple_of: Optional[int] = None,
-        return_attention_mask: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
+        return_attention_mask: Optional[bool] = None,
+        padding: Optional[str] = "max_length",
+        max_length: Optional[int] = None,
         sampling_rate: Optional[int] = None,
         **kwargs,
     ) -> BatchFeature:
         """
-        Main method to featurize and prepare for the model one or several sequence(s). sequences.
+        Main method to featurize and prepare for the model one or several sequence(s).
 
         Args:
             raw_speech (`np.ndarray`, `List[float]`, `List[np.ndarray]`, `List[List[float]]`):
                 The sequence or batch of sequences to be padded. Each sequence can be a numpy array, a list of float
                 values, a list of numpy arrays or a list of list of float values.
-            padding (`bool`, `str` or [`~utils.PaddingStrategy`], *optional*, defaults to `True`):
-                Select a strategy to pad the returned sequences (according to the model's padding side and padding
-                index) among:
-
-                - `True` or `'longest'`: Pad to the longest sequence in the batch (or no padding if only a single
-                  sequence if provided).
-                - `'max_length'`: Pad to a maximum length specified with the argument `max_length` or to the maximum
-                  acceptable input length for the model if that argument is not provided.
-                - `False` or `'do_not_pad'` (default): No padding (i.e., can output a batch with sequences of different
-                  lengths).
-            max_length (`int`, *optional*):
-                Maximum length of the returned list and optionally padding length (see above).
-            truncation (`bool`):
+            truncation (`bool`, *optional*, default to `True`):
                 Activates truncation to cut input sequences longer than *max_length* to *max_length*.
-            pad_to_multiple_of (`int`, *optional*):
+            pad_to_multiple_of (`int`, *optional*, defaults to None):
                 If set will pad the sequence to a multiple of the provided value.
 
                 This is especially useful to enable the use of Tensor Cores on NVIDIA hardware with compute capability
@@ -141,8 +319,8 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
 
                 <Tip>
 
-                For Speech2TextTransoformer models, `attention_mask` should alwys be passed for batched inference, to
-                avoid subtle bugs.
+                For WhisperTransoformer models, `attention_mask` should alwys be passed for batched inference, to avoid
+                subtle bugs.
 
                 </Tip>
 
@@ -154,27 +332,10 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
                 - `'np'`: Return Numpy `np.ndarray` objects.
             sampling_rate (`int`, *optional*):
                 The sampling rate at which the `raw_speech` input was sampled. It is strongly recommended to pass
-                `sampling_rate` at the forward call to prevent silent errors.
+                `sampling_rate` at the forward call to prevent silent errors and allow automatic speech recognition
+                pipeline.
             padding_value (`float`, defaults to 0.0):
                 The value that is used to fill the padding values / vectors.
-        """
-        """
-        wav2vec2는 단순 audio만 받으면 됐지만 transformer-transducer와 같은 streamming모델들은 extractor를 다르게 만들어야 한다.
-        raw_audio, mel_spectrogram이 두게가 들어오는걸 상정하고 만들어야 한다.
-        extractor
-
-
-        np.ndarray: mini_batch 사이즈 만큼 들어올 때
-        size(batch, audio_dim) or size(batch, mel_features, time_seq)
-        
-        List[float]: 그냥 raw_audio만 들어올때
-        size(audio_dim)
-        
-        List[np.ndarray]: raw_audio가 batch_size만큼 들어올 때 ndarray.ver
-        size(batch, audio_dim.ndarray_ver) or size(batch, mel_features.ndarray_ver, time_seq.ndarray_ver)
-
-        List[List[float]: raw_audio가 batch_size만큼 들어올 때 list.ver
-        size(batch, audio_dim.list_ver) or size(mel_features.list_ver, time_seq.list_ver)
         """
 
         if sampling_rate is not None:
@@ -190,51 +351,67 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
                 "Failing to do so can result in silent errors that might be hard to debug."
             )
 
-        is_sequential = isinstance(raw_speech, (list, tuple))
-        inner_type = isinstance(raw_speech[0], np.ndarray) or isinstance(raw_speech[0], (tuple, list))
-        is_batched: bool = is_sequential and inner_type
-        # list인데 내부에 ndarray나 list가 들어가 있는 경우를 찾는 듯
-        # batched는 아마 list형식의 내부에 ndarray, list같은 값이 들어가 있는 경우를 뜻하는듯 함.
+        is_batched = bool(
+            isinstance(raw_speech, (list, tuple))
+            and (isinstance(raw_speech[0], np.ndarray) or isinstance(raw_speech[0], (tuple, list)))
+        )
 
-        if is_batched:  # List[np.ndarray], List[List[float]]인 경우
-            raw_speech = [np.asarray(speech, dtype=np.float32) for speech in raw_speech]
-        elif not is_batched and not isinstance(raw_speech, np.ndarray):  # List[float]인 경우
+        if is_batched:
+            raw_speech = [np.asarray([speech], dtype=np.float32).T for speech in raw_speech]
+        elif not is_batched and not isinstance(raw_speech, np.ndarray):
             raw_speech = np.asarray(raw_speech, dtype=np.float32)
-        elif isinstance(raw_speech, np.ndarray) and raw_speech.dtype is np.dtype(np.float64):  # np.ndarray인 경우
+        elif isinstance(raw_speech, np.ndarray) and raw_speech.dtype is np.dtype(np.float64):
             raw_speech = raw_speech.astype(np.float32)
 
         # always return batch
-        if not is_batched and raw_speech.ndim != 3:
-            raw_speech = [raw_speech]
-        # 여기 이후부터는 list 형식임.
+        if not is_batched:
+            raw_speech = [np.asarray([raw_speech]).T]
 
-        # extractor의 call은 값의 추출과 추출한 값들을 padding시키는 매소드다.
-        # raw_speech.ndim != 3를 한 이유는 mel이 들어오더라도 2차원 값이 아닌 무조건 3차원 값이여야 하기 때문에 저런식으로 코드를 작성했다.
-
-        features = [self.extract_features(waveform) for waveform in raw_speech]  # [bsz, raw_aduio]
-        features = [self.compress_features(mel) for mel in features]  # [bsz, mel, raw_aduio]
+        batched_speech = BatchFeature({"input_features": raw_speech})
 
         # convert into correct format for padding
-        encoded_inputs = BatchFeature({"input_features": features})
-        # [TODO]: max_length를 여기서 지정해서 알아서 잘라내도록 할 수 있지 않을까?
+
         padded_inputs = self.pad(
-            encoded_inputs,
+            batched_speech,
             padding=padding,
-            max_length=max_length,
+            max_length=max_length if max_length else self.n_samples,
             truncation=truncation,
             pad_to_multiple_of=pad_to_multiple_of,
-            return_attention_mask=return_attention_mask,
             **kwargs,
         )
-
         # make sure list is in array format
-        input_features = padded_inputs.get("input_features")
-        if isinstance(input_features[0], list):
-            padded_inputs["input_features"] = [np.asarray(feature, dtype=np.float32) for feature in input_features]
+        input_features = padded_inputs.get("input_features").transpose(2, 0, 1)
 
-        attention_mask = padded_inputs.get("attention_mask")
-        if attention_mask is not None:
-            padded_inputs["attention_mask"] = [np.asarray(array, dtype=np.int32) for array in attention_mask]
+        # 내 생각에는 torchaudio가 설치되어 있지 않으면 python구현 mel-spectrogram으로 가고,
+        # 만약 있으면 torchaudio melspectrogram으로 진행할려 했지만 그걸 구현하지 않은 것 같다
+
+        filters = self.mel_filters
+        window = self.window
+        # [NOTE]: Mel-Spectrogram
+        frames = self.fram_wave(input_features[0][0], center=True)
+        stft = self.stft(frames, window=window)
+        # magnitudes = np.abs(stft[:, :-1]) ** 2
+        magnitudes = np.abs(stft) ** 2
+        mel_spec = filters @ magnitudes
+
+        log_spec = np.log10(np.clip(mel_spec, a_min=1e-10, a_max=None))
+        log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
+
+        # [NOTE]: log scale
+        test_1 = (log_spec + 4.0) / 4.0
+
+        test_2 = self.mel_transform(torch.tensor(input_features[0][0]))[:, :-1].numpy()
+
+        if is_torchaudio_available():
+            # device가 있는 상태로 들어오면 어떻게 하지?
+            input_features = []
+        else:
+            input_features = [self._np_extract_fbank_features(waveform) for waveform in input_features[0]]
+
+        if isinstance(input_features[0], List):
+            padded_inputs["input_features"] = [np.asarray(feature, dtype=np.float32) for feature in input_features]
+        else:
+            padded_inputs["input_features"] = input_features
 
         if return_tensors is not None:
             padded_inputs = padded_inputs.convert_to_tensors(return_tensors)

@@ -132,7 +132,7 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         self.mel_scale = mel_scale
         self.center = center
         self.power = power
-        self.mel_filters = self.get_mel_filters(n_mels=feature_size, mel_scale=self.mel_scale)
+        self.mel_scale = self.get_mel_scale(n_mels=feature_size, mel_scale=self.mel_scale)
 
         """ 값이 같게 나오는지 테스트
             self.test = F.melscale_fbanks(
@@ -172,18 +172,7 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
 
         assert self.stack is not None or self.stride is not None, "windowing이 정상적으로 작동하지 않습니다!"
 
-    def compress_features(self, features: Union[List[np.ndarray], List["mel"], np.ndarray]) -> List[Any]:
-        if not isinstance(features, list):
-            features = [features]
-
-        return_list = list()
-        for mel in features:
-            compressed_feature = self._compress_features(mel)
-            return_list.append(compressed_feature)
-
-        return return_list
-
-    def _compress_features(self, mel_feature: np.ndarray) -> np.ndarray:
+    def mel_compressor(self, mel_feature: np.ndarray) -> np.ndarray:
         """mel을 windowing을 적용시켜 값을 압축시킨다."""
         # [NOTE]: 여기서 각각의 멜을 windowing + padding한 뒤 나머지 compress_mel을 padding하는 방식으로 진행해야 할 듯 하다.
         #         compress_features에서 padding을 처리하지 않고 하기에는 self._pad를 overriding해서 새로 만들어야 함.
@@ -206,7 +195,7 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         padded_feature = np.concatenate(mel_store, axis=1)
         return padded_feature
 
-    def get_mel_filters(
+    def get_mel_scale(
         self,
         n_mels: int = 128,
         dtype=np.float32,
@@ -332,7 +321,7 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         # magnitudes = np.abs(stft[:, :-1]) ** 2
         magnitudes = np.abs(stft) ** self.power
 
-        filters = np.transpose(self.mel_filters, (1, 0))
+        filters = np.transpose(self.mel_scale, (1, 0))
         mel_spec = np.matmul(filters, magnitudes)
 
         return mel_spec
@@ -344,6 +333,23 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         mel_spec = mel_spec.numpy()
 
         return mel_spec
+
+    def apply_log(self, mel_features: np.ndarray) -> np.ndarray:
+        log_spec = np.log10(np.clip(mel_features, a_min=1e-10, a_max=None))
+        log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
+
+        # [NOTE]: log scale
+        log_mel = (log_spec + 4.0) / 4.0
+        return log_mel
+
+    def log_mel_transform(self, raw_speechs: List[np.ndarray]) -> np.ndarray:
+        if is_torchaudio_available():
+            mel_features = [self.torch_mel_spectrogram(waveform) for waveform in raw_speechs]
+        else:
+            mel_features = [self.numpy_mel_spectrogram(waveform) for waveform in raw_speechs]
+
+        log_mel_spectrograms = [self.apply_log(mel) for mel in mel_features]
+        return log_mel_spectrograms
 
     def __call__(
         self,
@@ -427,9 +433,9 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         if not is_batched:
             raw_speech = [np.asarray([raw_speech]).T]
 
-        batched_speech = BatchFeature({"input_features": raw_speech})
-
-        # convert into correct format for padding
+        log_mel_features = self.log_mel_transform(raw_speech)
+        compress_features = [self.mel_compressor(log_mel) for log_mel in log_mel_features]
+        batched_speech = BatchFeature({"input_features": compress_features})
 
         padded_inputs = self.pad(
             batched_speech,
@@ -441,13 +447,6 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         )
         # make sure list is in array format
         input_features = padded_inputs.get("input_features").transpose(2, 0, 1)
-
-        mel_spec = None
-        log_spec = np.log10(np.clip(mel_spec, a_min=1e-10, a_max=None))
-        log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
-
-        # [NOTE]: log scale
-        log_spec = (log_spec + 4.0) / 4.0
 
         if is_torchaudio_available():
             # device가 있는 상태로 들어오면 어떻게 하지?

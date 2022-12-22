@@ -1,5 +1,7 @@
 import math
 from typing import Dict, List, Optional, Union, Any, Callable
+import warnings
+
 
 import numpy as np
 from numpy.fft import fft
@@ -19,8 +21,71 @@ from transformers.utils import PaddingStrategy, TensorType, logging
 
 logger = logging.get_logger(__name__)
 
-DECIBEL = 2 * 20 * math.log10(torch.iinfo(torch.int16).max)
-GAIN = pow(10, 0.05 * DECIBEL)
+
+# [NOTE]: copied from https://github.com/pytorch/audio/blob/main/torchaudio/functional/functional.py#L415-L446
+def hz_to_mel(freq: float, mel_scale: str = "htk") -> float:
+    r"""Convert Hz to Mels.
+    Args:
+        freqs (float): Frequencies in Hz
+        mel_scale (str, optional): Scale to use: ``htk`` or ``slaney``. (Default: ``htk``)
+    Returns:
+        mels (float): Frequency in Mels
+    """
+
+    if mel_scale not in ["slaney", "htk"]:
+        raise ValueError('mel_scale should be one of "htk" or "slaney".')
+
+    if mel_scale == "htk":
+        return 2595.0 * math.log10(1.0 + (freq / 700.0))
+
+    # Fill in the linear part
+    f_min = 0.0
+    f_sp = 200.0 / 3
+
+    mels = (freq - f_min) / f_sp
+
+    # Fill in the log-scale part
+    min_log_hz = 1000.0
+    min_log_mel = (min_log_hz - f_min) / f_sp
+    logstep = math.log(6.4) / 27.0
+
+    if freq >= min_log_hz:
+        mels = min_log_mel + math.log(freq / min_log_hz) / logstep
+
+    return mels
+
+
+# [NOTE]: copied from https://github.com/pytorch/audio/blob/main/torchaudio/functional/functional.py#L449-L479
+def mel_to_hz(mels: np.ndarray, mel_scale: str = "htk") -> np.ndarray:
+    """Convert mel bin numbers to frequencies.
+    Args:
+        mels (Tensor): Mel frequencies
+        mel_scale (str, optional): Scale to use: ``htk`` or ``slaney``. (Default: ``htk``)
+    Returns:
+        freqs (Tensor): Mels converted in Hz
+    """
+
+    if mel_scale not in ["slaney", "htk"]:
+        raise ValueError('mel_scale should be one of "htk" or "slaney".')
+
+    if mel_scale == "htk":
+        return 700.0 * (10.0 ** (mels / 2595.0) - 1.0)
+
+    # Fill in the linear scale
+    f_min = 0.0
+    f_sp = 200.0 / 3
+    freqs = f_min + f_sp * mels
+
+    # And now the nonlinear scale
+    min_log_hz = 1000.0
+    min_log_mel = (min_log_hz - f_min) / f_sp
+    logstep = math.log(6.4) / 27.0
+
+    log_t = mels >= min_log_mel
+    freqs[log_t] = min_log_hz * np.exp(logstep * (mels[log_t] - min_log_mel))
+
+    return freqs
+
 
 # [NOTE]: copied from whisper extractor
 class TransducerFeatureExtractor(SequenceFeatureExtractor):
@@ -33,10 +98,12 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         hop_length: int = 160,
         chunk_length: int = 30,
         n_fft: int = 400,
-        power: int = None,
+        power: int = 2.0,
         window_fn: Callable = None,
-        min_frequency: float = None,
-        max_frequency: float = None,
+        center: bool = True,
+        min_frequency: float = 0.0,
+        max_frequency: Optional[float] = None,
+        mel_scale: str = "slaney",
         stack: Optional[int] = 4,  # value from transformer-transducer paper
         stride: Optional[int] = 3,  # value from transformer-transducer paper
         padding_value: float = 0.0,
@@ -50,6 +117,11 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
             return_attention_mask=return_attention_mask,
             **kwargs,
         )
+        # [NOTE]: copied from torchaudio MelScale
+        check_max_freq = max_frequency is not None
+        self.f_max = max_frequency if check_max_freq else float(sampling_rate // 2)
+        self.f_min = min_frequency
+
         # [NOTE]: for Log-MelSpectrogram
         self.n_fft = n_fft
         self.hop_length = hop_length
@@ -57,7 +129,22 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         self.n_samples = chunk_length * sampling_rate
         self.nb_max_frames = self.n_samples // hop_length
         self.sampling_rate = sampling_rate
-        self.mel_filters = self.get_mel_filters(sampling_rate, n_fft, n_mels=feature_size)
+        self.mel_scale = mel_scale
+        self.center = center
+        self.power = power
+        self.mel_filters = self.get_mel_filters(n_mels=feature_size, mel_scale=self.mel_scale)
+
+        """ 값이 같게 나오는지 테스트
+            self.test = F.melscale_fbanks(
+                n_freqs=(self.n_fft // 2 + 1),
+                f_min=self.f_min,
+                f_max=self.f_max,
+                n_mels=feature_size,
+                sample_rate=self.sampling_rate,
+                norm=None,
+                mel_scale="slaney",
+            )        
+        """
 
         # np.hanning(self.n_fft + 1)[:-1]애서 (self.n_fft + 1)[:-1]를 하는 이유를 모르겠음.
         # 만약 n_fft가 400이라 했을 때 + 1 를 하는 건 window_length를 401개의 window값을 생성한다는 소리
@@ -68,7 +155,6 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
 
         if is_torchaudio_available():
             self.window_fn: torch.Tensor = lambda x: torch.tensor(np.hanning(x), dtype=torch.float32)
-
             self.mel_transform = MelSpectrogram(
                 n_fft=self.n_fft,
                 n_mels=self.feature_size,
@@ -76,18 +162,10 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
                 hop_length=self.hop_length,
                 window_fn=self.window_fn,
                 pad_mode="reflect",
-                center=True,
+                center=self.center,
+                mel_scale=self.mel_scale,
+                power=self.power,
             )
-            self.spectrogram = Spectrogram(
-                n_fft=self.n_fft,
-                hop_length=self.hop_length,
-                window_fn=self.window_fn,
-                pad_mode="reflect",
-                center=True,
-            )
-
-            F.melscale_fbanks
-
         # [NOTE]: for compression
         self.stack = stack
         self.stride = stride
@@ -128,75 +206,53 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         padded_feature = np.concatenate(mel_store, axis=1)
         return padded_feature
 
-    def piecewise_linear_log(features):
-        features[features > math.e] = torch.log(features[features > math.e])
-        features[features <= math.e] = features[features <= math.e] / math.e
-        return features
+    def get_mel_filters(
+        self,
+        n_mels: int = 128,
+        dtype=np.float32,
+        norm: Optional[str] = None,
+        mel_scale: str = "slaney",
+    ) -> np.ndarray:
 
-    def extract_features(self, waveform: torch.Tensor) -> np.ndarray:
-        """
-        Extract the mel spectrogram features and normalize them
-        """
-        features = self.mel_transform(waveform)
-        features = features.transpose(1, 0)
+        n_freqs = self.n_fft // 2 + 1
+        fb = np.zeros((n_freqs, n_mels), dtype=dtype)
+        all_freqs = np.linspace(0, self.sampling_rate // 2, n_freqs)
 
-        features = self.piecewise_linear_log((features * GAIN))
-        features = (features - self.global_mean) * self.global_invstddev
-        features = features.numpy()
+        m_min = hz_to_mel(self.f_min, mel_scale)
+        m_max = hz_to_mel(self.f_max, mel_scale)
 
-        return features
+        # n_mels is chennel_size
+        m_pts = np.linspace(m_min, m_max, n_mels + 2)
+        freqs = mel_to_hz(m_pts, mel_scale)
 
-    def get_mel_filters(self, sr, n_fft, n_mels=128, dtype=np.float32):
-        # Initialize the weights
+        f_diff = freqs[1:] - freqs[:-1]
+        slopes = freqs[np.newaxis, :] - all_freqs[:, np.newaxis]
 
-        # htk가 아닌 slaney로 진행함.
-
-        n_mels = int(n_mels)
-        weights = np.zeros((n_mels, int(1 + n_fft // 2)), dtype=dtype)
-
-        # Center freqs of each FFT bin
-        fftfreqs = np.fft.rfftfreq(n=n_fft, d=1.0 / sr)
-
-        # 'Center freqs' of mel bands - uniformly spaced between limits
-        min_mel = 0.0
-        max_mel = 45.245640471924965
-
-        mels = np.linspace(min_mel, max_mel, n_mels + 2)
-        mels = np.asanyarray(mels)
-
-        # Fill in the linear scale
-        f_min = 0.0
-        f_sp = 200.0 / 3
-        freqs = f_min + f_sp * mels
-
-        # And now the nonlinear scale
-        min_log_hz = 1000.0  # beginning of log region (Hz)
-        min_log_mel = (min_log_hz - f_min) / f_sp  # same (Mels)
-        logstep = np.log(6.4) / 27.0  # step size for log region
-
-        # If we have vector data, vectorize
-        log_t = mels >= min_log_mel
-        freqs[log_t] = min_log_hz * np.exp(logstep * (mels[log_t] - min_log_mel))
-
-        mel_f = freqs
-
-        fdiff = np.diff(mel_f)
-        ramps = np.subtract.outer(mel_f, fftfreqs)
-
-        for i in range(n_mels):
+        for idx in range(n_mels):
             # lower and upper slopes for all bins
-            lower = -ramps[i] / fdiff[i]
-            upper = ramps[i + 2] / fdiff[i + 1]
+            lower_slope = (-1.0 * slopes[:, :-2][:, idx]) / f_diff[idx]  # 맨 마지막의 1은 n_mels덕분에 자동으로 없어짐
+            upper_slope = slopes[:, idx + 2] / f_diff[idx + 1]
 
             # .. then intersect them with each other and zero
-            weights[i] = np.maximum(0, np.minimum(lower, upper))
+            fb[:, idx] = np.maximum(0, np.minimum(lower_slope, upper_slope))
+
+        # [NOTE]: copied from https://github.com/pytorch/audio/blob/main/torchaudio/functional/functional.py#L565-L575
+        if norm is not None and norm == "slaney":
+            enorm = 2.0 / (n_mels[2 : n_mels + 2] - n_mels[:n_mels])
+            fb *= enorm[:, np.newaxis]
+
+        if (fb.max(axis=0) == 0.0).any():
+            warnings.warn(
+                "At least one mel filterbank has all zero values. "
+                f"The value for `n_mels` ({n_mels}) may be set too high. "
+                f"Or, the value for `n_freqs` ({n_freqs}) may be set too low."
+            )
 
         # Slaney-style mel is scaled to be approx constant energy per channel
-        enorm = 2.0 / (mel_f[2 : n_mels + 2] - mel_f[:n_mels])
-        weights *= enorm[:, np.newaxis]
 
-        return weights
+        return fb
 
+    # [NOTE]: copied from https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/feature_extraction_whisper.py#L135-L169
     def fram_wave(self, waveform, center=True):
         """
         Transform a raw waveform into a list of smaller waveforms. The window length defines how much of the signal is
@@ -235,6 +291,7 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
             frames.append(frame)
         return np.stack(frames, 0)
 
+    # [NOTE]: copied from https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/feature_extraction_whisper.py#L171-L196
     def stft(self, frames, window):
         """
         Calculates the complex Short-Time Fourier Transform (STFT) of the given framed signal. Should give the same
@@ -262,28 +319,31 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
             data[f] = fft(fft_signal, axis=0)[:num_fft_bins]
         return data.T
 
-    def _np_extract_fbank_features(self, waveform: np.array) -> np.ndarray:
+    # [NOTE]: copied from https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/feature_extraction_whisper.py#L198-L216
+    def numpy_mel_spectrogram(self, waveform: np.ndarray) -> np.ndarray:
         """
         Compute the log-Mel spectrogram of the provided audio, gives similar results whisper's original torch
         implementation with 1e-5 tolerance.
         """
-        filters = self.mel_filters
-        window = np.hanning(self.n_fft + 1)[:-1]
-
         # [NOTE]: Mel-Spectrogram
-        frames = self.fram_wave(waveform)
-        stft = self.stft(frames, window=window)
-        magnitudes = np.abs(stft[:, :-1]) ** 2
-        mel_spec = filters @ magnitudes
+        frames = self.fram_wave(waveform, center=self.center)
+        stft = self.stft(frames, self.window)
 
-        # [NOTE]: Mel-Filter
-        log_spec = np.log10(np.clip(mel_spec, a_min=1e-10, a_max=None))
-        log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
+        # magnitudes = np.abs(stft[:, :-1]) ** 2
+        magnitudes = np.abs(stft) ** self.power
 
-        # [NOTE]: log scale
-        log_spec = (log_spec + 4.0) / 4.0
+        filters = np.transpose(self.mel_filters, (1, 0))
+        mel_spec = np.matmul(filters, magnitudes)
 
-        return log_spec
+        return mel_spec
+
+    # [NOTE]: idea come from https://github.com/anton-l/transformers/blob/2a21426a5807195610c6b832c00c2813c3e25253/src/transformers/models/emformer/feature_extraction_emformer.py#L100-L111
+    def torch_mel_spectrogram(self, waveform: np.ndarray) -> np.ndarray:
+        waveform = torch.tensor(waveform)
+        mel_spec = self.mel_transform(waveform)
+        mel_spec = mel_spec.numpy()
+
+        return mel_spec
 
     def __call__(
         self,
@@ -382,25 +442,12 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         # make sure list is in array format
         input_features = padded_inputs.get("input_features").transpose(2, 0, 1)
 
-        # 내 생각에는 torchaudio가 설치되어 있지 않으면 python구현 mel-spectrogram으로 가고,
-        # 만약 있으면 torchaudio melspectrogram으로 진행할려 했지만 그걸 구현하지 않은 것 같다
-
-        filters = self.mel_filters
-        window = self.window
-        # [NOTE]: Mel-Spectrogram
-        frames = self.fram_wave(input_features[0][0], center=True)
-        stft = self.stft(frames, window=window)
-        # magnitudes = np.abs(stft[:, :-1]) ** 2
-        magnitudes = np.abs(stft) ** 2
-        mel_spec = filters @ magnitudes
-
+        mel_spec = None
         log_spec = np.log10(np.clip(mel_spec, a_min=1e-10, a_max=None))
         log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
 
         # [NOTE]: log scale
-        test_1 = (log_spec + 4.0) / 4.0
-
-        test_2 = self.mel_transform(torch.tensor(input_features[0][0]))[:, :-1].numpy()
+        log_spec = (log_spec + 4.0) / 4.0
 
         if is_torchaudio_available():
             # device가 있는 상태로 들어오면 어떻게 하지?

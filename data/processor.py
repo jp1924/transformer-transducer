@@ -77,6 +77,14 @@ class TransducerProcessor(ProcessorMixin):
         """
         return self.tokenizer.decode(*args, **kwargs)
 
+    def mel_compressor(self, *args, **kwargs):
+        """"""
+        return self.feature_extractor.mel_compressor(*args, **kwargs)
+
+    def log_mel_transform(self, *args, **kwargs):
+        """"""
+        return self.feature_extractor.log_mel_transform(*args, **kwargs)
+
     @contextmanager
     def as_target_processor(self):
         """

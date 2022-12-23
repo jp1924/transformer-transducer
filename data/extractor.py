@@ -132,7 +132,7 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         self.mel_scale = mel_scale
         self.center = center
         self.power = power
-        self.mel_scale = self.get_mel_scale(n_mels=feature_size, mel_scale=self.mel_scale)
+        self.mel_filter = self.get_mel_filter(n_mels=feature_size, mel_scale=self.mel_scale)
 
         """ 값이 같게 나오는지 테스트
             self.test = F.melscale_fbanks(
@@ -145,10 +145,6 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
                 mel_scale="slaney",
             )        
         """
-
-        # np.hanning(self.n_fft + 1)[:-1]애서 (self.n_fft + 1)[:-1]를 하는 이유를 모르겠음.
-        # 만약 n_fft가 400이라 했을 때 + 1 를 하는 건 window_length를 401개의 window값을 생성한다는 소리
-        # 근데 거기서 다시 [:-1]를 하는게 이해가 안됨. 값의 scale를 낮추는 역할을 하는 건가/
 
         # window = np.hanning(self.n_fft + 1)[:-1]
         self.window = np.hanning(self.n_fft)
@@ -195,7 +191,7 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         padded_feature = np.concatenate(mel_store, axis=1)
         return padded_feature
 
-    def get_mel_scale(
+    def get_mel_filter(
         self,
         n_mels: int = 128,
         dtype=np.float32,
@@ -321,7 +317,7 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         # magnitudes = np.abs(stft[:, :-1]) ** 2
         magnitudes = np.abs(stft) ** self.power
 
-        filters = np.transpose(self.mel_scale, (1, 0))
+        filters = np.transpose(self.mel_filter, (1, 0))
         mel_spec = np.matmul(filters, magnitudes)
 
         return mel_spec
@@ -343,23 +339,23 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         return log_mel
 
     def log_mel_transform(self, raw_speechs: List[np.ndarray]) -> np.ndarray:
-        if is_torchaudio_available():
+        if is_torchaudio_available() and False:
             mel_features = [self.torch_mel_spectrogram(waveform) for waveform in raw_speechs]
         else:
             mel_features = [self.numpy_mel_spectrogram(waveform) for waveform in raw_speechs]
 
-        log_mel_spectrograms = [self.apply_log(mel) for mel in mel_features]
+        log_mel_spectrograms = [self.apply_log(mel[:, :-1]) for mel in mel_features]
         return log_mel_spectrograms
 
     def __call__(
         self,
         raw_speech: Union[np.ndarray, List[float], List[np.ndarray], List[List[float]]],
-        truncation: bool = True,
+        truncation: bool = False,
         pad_to_multiple_of: Optional[int] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         return_attention_mask: Optional[bool] = None,
-        padding: Optional[str] = "max_length",
-        max_length: Optional[int] = None,
+        padding: Optional[Union[str, bool]] = True,
+        max_length: Optional[int] = 512,
         sampling_rate: Optional[int] = None,
         **kwargs,
     ) -> BatchFeature:
@@ -423,7 +419,7 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         )
 
         if is_batched:
-            raw_speech = [np.asarray([speech], dtype=np.float32).T for speech in raw_speech]
+            raw_speech = [np.asarray(speech, dtype=np.float32) for speech in raw_speech]
         elif not is_batched and not isinstance(raw_speech, np.ndarray):
             raw_speech = np.asarray(raw_speech, dtype=np.float32)
         elif isinstance(raw_speech, np.ndarray) and raw_speech.dtype is np.dtype(np.float64):
@@ -431,29 +427,24 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
 
         # always return batch
         if not is_batched:
-            raw_speech = [np.asarray([raw_speech]).T]
+            raw_speech = [raw_speech]
 
         log_mel_features = self.log_mel_transform(raw_speech)
-        compress_features = [self.mel_compressor(log_mel) for log_mel in log_mel_features]
-        batched_speech = BatchFeature({"input_features": compress_features})
+        log_mel_features = [np.transpose(log_mel, (1, 0)) for log_mel in log_mel_features]
+        compressed_features = [self.mel_compressor(log_mel) for log_mel in log_mel_features]
+        batched_mel = BatchFeature({"input_features": compressed_features})
 
         padded_inputs = self.pad(
-            batched_speech,
+            batched_mel,
             padding=padding,
-            max_length=max_length if max_length else self.n_samples,
+            max_length=max_length,
             truncation=truncation,
             pad_to_multiple_of=pad_to_multiple_of,
+            return_attention_mask=return_attention_mask,
             **kwargs,
         )
-        # make sure list is in array format
-        input_features = padded_inputs.get("input_features").transpose(2, 0, 1)
 
-        if is_torchaudio_available():
-            # device가 있는 상태로 들어오면 어떻게 하지?
-            input_features = []
-        else:
-            input_features = [self._np_extract_fbank_features(waveform) for waveform in input_features[0]]
-
+        input_features = padded_inputs.get("input_features")
         if isinstance(input_features[0], List):
             padded_inputs["input_features"] = [np.asarray(feature, dtype=np.float32) for feature in input_features]
         else:

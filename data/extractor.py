@@ -333,11 +333,16 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
             raw_speechs = [raw_speechs]
 
         if is_torchaudio_available() and not do_numpy:
+            # [BUG]: multi-processing중에 무한루프에 걸리는 버그가 있음
             mel_features = [self.torch_mel_spectrogram(waveform) for waveform in raw_speechs]
         else:
             mel_features = [self.numpy_mel_spectrogram(waveform) for waveform in raw_speechs]
 
         log_mel_spectrograms = [self.apply_log(mel[:, :-1]) for mel in mel_features]
+
+        # transpose
+        log_mel_spectrograms = [np.transpose(log_mel, (1, 0)) for log_mel in log_mel_spectrograms]
+
         return log_mel_spectrograms
 
     def __call__(
@@ -426,7 +431,6 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
 
         # [NOTE]: I don't know why, but in the field of voice processing,
         #         it is processed as time_seq and mel_seq. So, I do traspose as below.
-        log_mel_features = [np.transpose(log_mel, (1, 0)) for log_mel in log_mel_features]
         compressed_features = [self.mel_compressor(log_mel) for log_mel in log_mel_features]
         batched_mel = BatchFeature({"input_features": compressed_features})
 

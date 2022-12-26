@@ -54,16 +54,39 @@ def main(parser: HfArgumentParser) -> None:
 
         return result
 
-    def preprocess(dataset: datasets.Dataset) -> Dict[str, Any]:
+    def preprocessor(dataset: datasets.Dataset) -> Dict[str, Any]:
         byte_audio = dataset.data["audio"]["bytes"]
         str_txt = dataset.data["text"]
         raw_audio, sr = sf.read(io.BytesIO(byte_audio))
 
+        # outout: [shape(mel_seq, time_seq), ...]
         log_mel = extractor.log_mel_transform(raw_audio, do_numpy=True)
         int_txt = tokenizer.encode(str_txt)
 
-        preprocess_result = {"audio": log_mel, "text": int_txt}
-        return preprocess_result
+        log_mel = log_mel[0]
+        time_len = log_mel.shape[1]
+
+        processing_result = {
+            "audio": log_mel,
+            "text": int_txt,
+            "length": time_len,
+        }
+        return processing_result
+
+    def data_preprocessing(data_type: str) -> datasets.Dataset:
+        data_collate: str = lambda key: [asr_data[data_name] for data_name in asr_data if key in data_name]
+        logger.info(f"------------ {data_type}_data preprocessing ------------")
+        data = datasets.concatenate_datasets(data_collate(data_type))
+
+        cache_file_name = f"{data_args.data_name}_{data_type}.arrow"
+        data = data.map(
+            preprocessor,
+            batch_size=1,
+            load_from_cache_file=True,
+            num_proc=data_args.num_proc,
+            cache_file_name=cache_file_name,
+        )
+        return data
 
     tokenizer = TransducerTokenizer.from_pretrained(
         "facebook/wav2vec2-base-960h",
@@ -84,49 +107,9 @@ def main(parser: HfArgumentParser) -> None:
     # [NOTE]: data load
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
 
-    # [NOTE]: data preprocess
-    data_collate: str = lambda key: [asr_data[data_name] for data_name in asr_data if key in data_name]
-    if train_args.do_train:
-        logger.info("------------ train_data preprocessing ------------")
-        train_data = datasets.concatenate_datasets(data_collate("train"))
-
-        cache_file_name = f"{data_args.data_name}_train.arrow"
-        train_data = train_data.map(
-            preprocess,
-            load_from_cache_file=True,
-            num_proc=data_args.num_proc,
-            cache_file_name=cache_file_name,
-        )
-    else:
-        train_data = None
-
-    if train_args.do_eval:
-        logger.info("------------ valid_data preprocessing ------------")
-        valid_data = datasets.concatenate_datasets(data_collate("valid"))
-
-        cache_file_name = f"{data_args.data_name}_valid.arrow"
-        valid_data = valid_data.map(
-            preprocess,
-            load_from_cache_file=True,
-            num_proc=data_args.num_proc,
-            cache_file_name=cache_file_name,
-        )
-    else:
-        valid_data = None
-
-    if train_args.do_predict:
-        logger.info("------------ test_data preprocessing -------------")
-        test_data = datasets.concatenate_datasets(data_collate("test"))
-
-        cache_file_name = f"{data_args.data_name}_test.arrow"
-        test_data = test_data.map(
-            preprocess,
-            load_from_cache_file=True,
-            num_proc=data_args.num_proc,
-            cache_file_name=cache_file_name,
-        )
-    else:
-        test_data = None
+    train_data = data_preprocessing("train") if train_args.do_train else None
+    valid_data = data_preprocessing("valid") if train_args.do_eval else None
+    test_data = data_preprocessing("test") if train_args.do_test else None
 
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
     collator = TransducerCollator(

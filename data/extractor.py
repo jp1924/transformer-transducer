@@ -1,5 +1,5 @@
 import math
-from typing import Dict, List, Optional, Union, Any, Callable
+from typing import List, Optional, Union, Callable
 import warnings
 
 
@@ -16,7 +16,7 @@ if is_torchaudio_available():
 
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
-from transformers.utils import PaddingStrategy, TensorType, logging
+from transformers.utils import TensorType, logging
 
 
 logger = logging.get_logger(__name__)
@@ -87,19 +87,24 @@ def mel_to_hz(mels: np.ndarray, mel_scale: str = "htk") -> np.ndarray:
     return freqs
 
 
+# [NOTE]: At first, it was modeled after Whisper's extractor,
+#         but later, it included the emulator's extractor, which made both torchaudio and numpy possible
+
 # [NOTE]: copied from whisper extractor
+#         It can be driven by pytorch or numpy.
 class TransducerFeatureExtractor(SequenceFeatureExtractor):
     model_input_names = ["input_features", "attention_mask"]
 
+    # feature_size: 128, n_fft: 512, hop_length: 256(win_length(n_fft) / 2)
+    # 400 / 16000 = 0.025
     def __init__(
         self,
+        n_fft: int = 400,
         feature_size: int = 80,
         sampling_rate: int = 16000,
         hop_length: int = 160,
-        chunk_length: int = 30,
-        n_fft: int = 400,
         power: int = 2.0,
-        window_fn: Callable = None,
+        window_fn: Callable = None,  # temp
         center: bool = True,
         min_frequency: float = 0.0,
         max_frequency: Optional[float] = None,
@@ -125,26 +130,11 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         # [NOTE]: for Log-MelSpectrogram
         self.n_fft = n_fft
         self.hop_length = hop_length
-        self.chunk_length = chunk_length
-        self.n_samples = chunk_length * sampling_rate
-        self.nb_max_frames = self.n_samples // hop_length
         self.sampling_rate = sampling_rate
         self.mel_scale = mel_scale
         self.center = center
         self.power = power
         self.mel_filter = self.get_mel_filter(n_mels=feature_size, mel_scale=self.mel_scale)
-
-        """ 값이 같게 나오는지 테스트
-            self.test = F.melscale_fbanks(
-                n_freqs=(self.n_fft // 2 + 1),
-                f_min=self.f_min,
-                f_max=self.f_max,
-                n_mels=feature_size,
-                sample_rate=self.sampling_rate,
-                norm=None,
-                mel_scale="slaney",
-            )        
-        """
 
         # window = np.hanning(self.n_fft + 1)[:-1]
         self.window = np.hanning(self.n_fft)
@@ -324,7 +314,7 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
 
     # [NOTE]: idea come from https://github.com/anton-l/transformers/blob/2a21426a5807195610c6b832c00c2813c3e25253/src/transformers/models/emformer/feature_extraction_emformer.py#L100-L111
     def torch_mel_spectrogram(self, waveform: np.ndarray) -> np.ndarray:
-        waveform = torch.tensor(waveform)
+        waveform = torch.tensor(waveform, dtype=torch.float32)
         mel_spec = self.mel_transform(waveform)
         mel_spec = mel_spec.numpy()
 
@@ -338,8 +328,11 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
         log_mel = (log_spec + 4.0) / 4.0
         return log_mel
 
-    def log_mel_transform(self, raw_speechs: List[np.ndarray]) -> np.ndarray:
-        if is_torchaudio_available() and False:
+    def log_mel_transform(self, raw_speechs: Union[List[np.ndarray], np.ndarray], do_numpy: bool = False) -> np.ndarray:
+        if not isinstance(raw_speechs, list):
+            raw_speechs = [raw_speechs]
+
+        if is_torchaudio_available() and not do_numpy:
             mel_features = [self.torch_mel_spectrogram(waveform) for waveform in raw_speechs]
         else:
             mel_features = [self.numpy_mel_spectrogram(waveform) for waveform in raw_speechs]
@@ -430,6 +423,9 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
             raw_speech = [raw_speech]
 
         log_mel_features = self.log_mel_transform(raw_speech)
+
+        # [NOTE]: I don't know why, but in the field of voice processing,
+        #         it is processed as time_seq and mel_seq. So, I do traspose as below.
         log_mel_features = [np.transpose(log_mel, (1, 0)) for log_mel in log_mel_features]
         compressed_features = [self.mel_compressor(log_mel) for log_mel in log_mel_features]
         batched_mel = BatchFeature({"input_features": compressed_features})

@@ -1,23 +1,24 @@
+import io
 import os
 from argparse import Namespace
 from typing import Any, Dict, Tuple, Union
 from unicodedata import normalize
 
-import numpy as np
-import librosa
-import io
-import soundfile as sf
-
-import torch
-from data import TransducerCollator, TransducerFeatureExtractor, TransducerTokenizer, TransducerProcessor
 import datasets
+import librosa
+import numpy as np
+import soundfile as sf
+import torch
+from data import TransducerCollator, TransducerFeatureExtractor, TransducerProcessor, TransducerTokenizer
 from evaluate import load
 from model import TransformerTranducerForRNNT, TransformerTransducerConfig
 from setproctitle import setproctitle
-from transformers import HfArgumentParser, Seq2SeqTrainer, Wav2Vec2CTCTokenizer, Wav2Vec2Tokenizer, set_seed
+from transformers import HfArgumentParser, Seq2SeqTrainer, Wav2Vec2CTCTokenizer, Wav2Vec2Tokenizer, logging, set_seed
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
 from utils import DataArguments, ModelArguments, TransducerTrainArgument
+
+logger = logging.get_logger("transformers")
 
 
 def main(parser: HfArgumentParser) -> None:
@@ -80,16 +81,52 @@ def main(parser: HfArgumentParser) -> None:
     config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
     model = TransformerTranducerForRNNT(config)
 
+    # [NOTE]: data load
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
 
+    # [NOTE]: data preprocess
     data_collate: str = lambda key: [asr_data[data_name] for data_name in asr_data if key in data_name]
-    train_data = datasets.concatenate_datasets(data_collate("train")) if train_args.do_train else None
-    valid_data = datasets.concatenate_datasets(data_collate("valid")) if train_args.do_eval else None
-    test_data = datasets.concatenate_datasets(data_collate("test")) if train_args.do_predict else None
+    if train_args.do_train:
+        logger.info("------------ train_data preprocessing ------------")
+        train_data = datasets.concatenate_datasets(data_collate("train"))
 
-    train_data = train_data.map(preprocess, num_proc=data_args.num_proc) if train_data else None
-    valid_data = valid_data.map(preprocess, num_proc=data_args.num_proc) if valid_data else None
-    test_data = test_data.map(preprocess, num_proc=data_args.num_proc) if test_data else None
+        cache_file_name = f"{data_args.data_name}_train.arrow"
+        train_data = train_data.map(
+            preprocess,
+            load_from_cache_file=True,
+            num_proc=data_args.num_proc,
+            cache_file_name=cache_file_name,
+        )
+    else:
+        train_data = None
+
+    if train_args.do_eval:
+        logger.info("------------ valid_data preprocessing ------------")
+        valid_data = datasets.concatenate_datasets(data_collate("valid"))
+
+        cache_file_name = f"{data_args.data_name}_valid.arrow"
+        valid_data = valid_data.map(
+            preprocess,
+            load_from_cache_file=True,
+            num_proc=data_args.num_proc,
+            cache_file_name=cache_file_name,
+        )
+    else:
+        valid_data = None
+
+    if train_args.do_predict:
+        logger.info("------------ test_data preprocessing -------------")
+        test_data = datasets.concatenate_datasets(data_collate("test"))
+
+        cache_file_name = f"{data_args.data_name}_test.arrow"
+        test_data = test_data.map(
+            preprocess,
+            load_from_cache_file=True,
+            num_proc=data_args.num_proc,
+            cache_file_name=cache_file_name,
+        )
+    else:
+        test_data = None
 
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
     collator = TransducerCollator(
@@ -112,6 +149,7 @@ def main(parser: HfArgumentParser) -> None:
         data_collator=collator,
         callbacks=callbacks,
     )
+
     if train_args.do_train:
         train(trainer, train_args)
     if train_args.do_eval:
@@ -168,7 +206,6 @@ def predict(trainer: Seq2SeqTrainer, test_data: datasets.Dataset) -> None:
         Trainer를 전달받아 Trainer.predict을 실행시키는 함수입니다.
         이때 Seq2SeqTrainer의 Predict이 실행되며 model.generator를 실행시키기 위해
         arg값의 predict_with_generater값을 강제로 True로 변환시킵니다.
-        True로 변환시키면 model.generator에서 BeamSearch를 진행해 더 질이 좋은 결과물을 만들 수 있습니다.
     Args:
         trainer (Seq2SeqTrainer): Huggingface의 torch Seq2SeqTrainer를 전달받습니다.
         test_data (Dataset): 검증을 하기 위한 Data를 전달받습니다.
@@ -179,5 +216,4 @@ def predict(trainer: Seq2SeqTrainer, test_data: datasets.Dataset) -> None:
 
 if "__main__" in __name__:
     parser = HfArgumentParser([TransducerTrainArgument, DataArguments, ModelArguments])
-    # https://code.visualstudio.com/docs/python/debugging#_redirectoutput
     main(parser)

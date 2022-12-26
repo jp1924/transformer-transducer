@@ -4,13 +4,17 @@ from typing import Any, Dict, Tuple, Union
 from unicodedata import normalize
 
 import numpy as np
+import librosa
+import io
+import soundfile as sf
+
 import torch
 from data import TransducerCollator, TransducerFeatureExtractor, TransducerTokenizer, TransducerProcessor
 import datasets
 from evaluate import load
 from model import TransformerTranducerForRNNT, TransformerTransducerConfig
 from setproctitle import setproctitle
-from transformers import HfArgumentParser, Seq2SeqTrainer, Wav2Vec2Tokenizer, set_seed
+from transformers import HfArgumentParser, Seq2SeqTrainer, Wav2Vec2CTCTokenizer, Wav2Vec2Tokenizer, set_seed
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
 from utils import DataArguments, ModelArguments, TransducerTrainArgument
@@ -50,8 +54,15 @@ def main(parser: HfArgumentParser) -> None:
         return result
 
     def preprocess(dataset: datasets.Dataset) -> Dict[str, Any]:
+        byte_audio = dataset.data["audio"]["bytes"]
+        str_txt = dataset.data["text"]
+        raw_audio, sr = sf.read(io.BytesIO(byte_audio))
 
-        return
+        log_mel = extractor.log_mel_transform(raw_audio, do_numpy=True)
+        int_txt = tokenizer.encode(str_txt)
+
+        preprocess_result = {"audio": log_mel, "text": int_txt}
+        return preprocess_result
 
     tokenizer = TransducerTokenizer.from_pretrained(
         "facebook/wav2vec2-base-960h",
@@ -64,10 +75,10 @@ def main(parser: HfArgumentParser) -> None:
         stack=4,
         stride=3,
     )
-    processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
+    # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
 
-    config = TransformerTransducerConfig(vocab_size=processor.tokenizer.vocab_size)
-    model = TransformerTranducerForRNNT(config=config)
+    config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
+    model = TransformerTranducerForRNNT(config)
 
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
 
@@ -75,6 +86,10 @@ def main(parser: HfArgumentParser) -> None:
     train_data = datasets.concatenate_datasets(data_collate("train")) if train_args.do_train else None
     valid_data = datasets.concatenate_datasets(data_collate("valid")) if train_args.do_eval else None
     test_data = datasets.concatenate_datasets(data_collate("test")) if train_args.do_predict else None
+
+    train_data = train_data.map(preprocess, num_proc=data_args.num_proc) if train_data else None
+    valid_data = valid_data.map(preprocess, num_proc=data_args.num_proc) if valid_data else None
+    test_data = test_data.map(preprocess, num_proc=data_args.num_proc) if test_data else None
 
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
     collator = TransducerCollator(
@@ -89,7 +104,7 @@ def main(parser: HfArgumentParser) -> None:
     callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
     trainer = Seq2SeqTrainer(
         model=model,
-        tokenizer=processor,
+        tokenizer=tokenizer,
         train_dataset=train_data,
         eval_dataset=valid_data,
         args=train_args,

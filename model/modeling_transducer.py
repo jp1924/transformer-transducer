@@ -541,7 +541,7 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
         return DecoderOutput(
             last_hidden_states=hidden_states,
             decoder_attentions=all_attentions,
-            decoder_hidden_states=None,
+            decoder_hidden_states=all_hidden_states,
         )
 
 
@@ -770,7 +770,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
         return EncoderOutput(
             last_hidden_states=hidden_states,
             encoder_attentions=attentions,
-            encoder_hidden_states=None,
+            encoder_hidden_states=all_hidden_states,
         )
 
 

@@ -1,11 +1,12 @@
 import os
 from argparse import Namespace
 from typing import Any, Dict, Tuple, Union
+from unicodedata import normalize
 
 import numpy as np
 import torch
-from data import TransducerCollator, TransducerFeatureExtractor, get_concat_dataset
-from datasets import Dataset
+from data import TransducerCollator, TransducerFeatureExtractor, TransducerTokenizer
+import datasets
 from evaluate import load
 from model import TransformerTranducerForRNNT, TransformerTransducerConfig
 from setproctitle import setproctitle
@@ -48,25 +49,28 @@ def main(parser: HfArgumentParser) -> None:
 
         return result
 
-    tokenizer = Wav2Vec2Tokenizer.from_pretrained("test42/kerberus2", use_auth_token=True)
+    def preprocess(dataset: datasets.Dataset) -> Dict[str, Any]:
+
+        return
+
+    tokenizer = TransducerTokenizer.from_pretrained(
+        "facebook/wav2vec2-base-960h",
+        cache_dir=model_args.cache_dir,
+    )
     config = TransformerTransducerConfig(tokenizer.vocab_size)
     model = TransformerTranducerForRNNT(config)
 
-    extractor = TransducerFeatureExtractor(100, 16000, 0.0, 4, 3)
+    asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
 
-    # [NOTE]: temp
-    train_data = get_concat_dataset([data_args.data_name], "train") if train_args.do_train else None
-    valid_data = get_concat_dataset([data_args.data_name], "dev") if train_args.do_eval else None
-    test_data = get_concat_dataset([data_args.data_name], "eval_other") if train_args.do_predict else valid_data
+    data_collate: str = lambda key: [asr_data[data_name] for data_name in asr_data if key in data_name]
+    train_data = datasets.concatenate_datasets(data_collate("train")) if train_args.do_train else None
+    valid_data = datasets.concatenate_datasets(data_collate("valid")) if train_args.do_eval else None
+    test_data = datasets.concatenate_datasets(data_collate("test")) if train_args.do_test else None
 
-    train_data = train_data.rename_column("input_ids", "labels") if train_args.do_train else None
-    valid_data = valid_data.rename_column("input_ids", "labels") if train_args.do_eval else None
+    extractor = TransducerFeatureExtractor()
+    extractor([audio["array"] for audio in train_data[:2]["audio"]])
 
-    train_data = train_data.rename_column("input_values", "input_features") if train_args.do_train else None
-    valid_data = valid_data.rename_column("input_values", "input_features") if train_args.do_eval else None
-
-    wer = load("evaluate-metric/wer")
-
+    wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
     collator = TransducerCollator(
         tokenizer,
         train_args.mel_max_length,
@@ -75,8 +79,8 @@ def main(parser: HfArgumentParser) -> None:
         extractor=extractor,
         blank_id=config.blank_id,
     )
-    callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
 
+    callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
     trainer = Seq2SeqTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -125,7 +129,7 @@ def train(trainer: Seq2SeqTrainer, args: Namespace) -> None:
         trainer.save_model(save_path)
 
 
-def eval(trainer: Seq2SeqTrainer, eval_data: Dataset, args: Namespace) -> None:
+def eval(trainer: Seq2SeqTrainer, eval_data: datasets.Dataset, args: Namespace) -> None:
     """_eval_
         Trainer를 전달받아 Trainer.eval을 실행시키는 함수입니다.
     Args:
@@ -138,7 +142,7 @@ def eval(trainer: Seq2SeqTrainer, eval_data: Dataset, args: Namespace) -> None:
         trainer.save_metrics("eval", metrics)
 
 
-def predict(trainer: Seq2SeqTrainer, test_data: Dataset) -> None:
+def predict(trainer: Seq2SeqTrainer, test_data: datasets.Dataset) -> None:
     """_predict_
         Trainer를 전달받아 Trainer.predict을 실행시키는 함수입니다.
         이때 Seq2SeqTrainer의 Predict이 실행되며 model.generator를 실행시키기 위해

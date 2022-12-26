@@ -5,7 +5,7 @@ from unicodedata import normalize
 
 import numpy as np
 import torch
-from data import TransducerCollator, TransducerFeatureExtractor, TransducerTokenizer
+from data import TransducerCollator, TransducerFeatureExtractor, TransducerTokenizer, TransducerProcessor
 import datasets
 from evaluate import load
 from model import TransformerTranducerForRNNT, TransformerTransducerConfig
@@ -57,18 +57,24 @@ def main(parser: HfArgumentParser) -> None:
         "facebook/wav2vec2-base-960h",
         cache_dir=model_args.cache_dir,
     )
-    config = TransformerTransducerConfig(tokenizer.vocab_size)
-    model = TransformerTranducerForRNNT(config)
+    extractor = TransducerFeatureExtractor(
+        n_fft=512,
+        feature_size=128,
+        hop_length=256,
+        stack=4,
+        stride=3,
+    )
+    processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
+
+    config = TransformerTransducerConfig(vocab_size=processor.tokenizer.vocab_size)
+    model = TransformerTranducerForRNNT(config=config)
 
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
 
     data_collate: str = lambda key: [asr_data[data_name] for data_name in asr_data if key in data_name]
     train_data = datasets.concatenate_datasets(data_collate("train")) if train_args.do_train else None
     valid_data = datasets.concatenate_datasets(data_collate("valid")) if train_args.do_eval else None
-    test_data = datasets.concatenate_datasets(data_collate("test")) if train_args.do_test else None
-
-    extractor = TransducerFeatureExtractor()
-    extractor([audio["array"] for audio in train_data[:2]["audio"]])
+    test_data = datasets.concatenate_datasets(data_collate("test")) if train_args.do_predict else None
 
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
     collator = TransducerCollator(
@@ -83,7 +89,7 @@ def main(parser: HfArgumentParser) -> None:
     callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
     trainer = Seq2SeqTrainer(
         model=model,
-        tokenizer=tokenizer,
+        tokenizer=processor,
         train_dataset=train_data,
         eval_dataset=valid_data,
         args=train_args,

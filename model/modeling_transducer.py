@@ -247,13 +247,11 @@ class TransformerTransducerSelfAttention(nn.Module):
                 relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_states, positional_embedding)
                 relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_states, positional_embedding)
                 attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
-
         if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
             raise ValueError(
                 f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is"
                 f" {attn_weights.size()}"
             )
-
         if attention_mask is not None:
             if attention_mask.size() != (bsz, 1, tgt_len, src_len):
                 raise ValueError(
@@ -271,7 +269,6 @@ class TransformerTransducerSelfAttention(nn.Module):
                 )
             attn_weights = head_mask.view(1, -1, 1, 1) * attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-
         if output_attentions:
             # this operation is a bit awkward, but it's required to
             # make sure that attn_weights keeps its gradient.
@@ -286,7 +283,6 @@ class TransformerTransducerSelfAttention(nn.Module):
         # attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
 
         attn_probs = self.dropout(attn_weights)
-
         attn_output = torch.bmm(attn_probs, value_states)
 
         if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
@@ -389,7 +385,9 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
         self.config = config
         self.is_decoder = True
 
-        if False:
+        self.test = False
+
+        if self.test:
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=config.hidden_size,
                 nhead=config.num_attention_heads,
@@ -481,26 +479,27 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
             inputs_embeds=position_embed,
         )
 
-        if False:
+        if self.test:
             if attention_mask is not None:
                 attention_mask = attention_mask.squeeze(1)
                 attention_mask = attention_mask.repeat(self.head_size, 1, 1)
                 attention_mask = attention_mask.bool()
             hidden_states = self.encoder(hidden_states, attention_mask)
             all_attentions = None
-            encoder_states = None
+            all_hidden_states = None
         else:
-            # decoder layers
             all_hidden_states = () if output_hidden_states else None
-            all_self_attns = () if output_attentions else None
-            next_decoder_cache = () if use_cache else None
-
-            encoder_states = () if output_hidden_states else None
             all_attentions = () if output_attentions else None
+            if head_mask is not None:
+                if head_mask.size()[0] != (len(self.layers)):
+                    raise ValueError(
+                        f"The head_mask should be specified for {len(self.layers)} layers, but it is for"
+                        f" {head_mask.size()[0]}."
+                    )
 
             for idx, decoder_layer in enumerate(self.layers):
                 if output_hidden_states:
-                    encoder_states = encoder_states + (hidden_states,)
+                    all_hidden_states = all_hidden_states + (hidden_states,)
                 # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
                 dropout_probability = random.uniform(0, 1)
                 if self.training and (dropout_probability < self.layerdrop):  # skip the layer
@@ -531,13 +530,13 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
                     hidden_states = layer_outputs[0]
 
                 if output_attentions:
-                    all_attentions = all_attentions + (layer_outputs[1],)
+                    all_attentions += (layer_outputs[1],)
 
-        if output_hidden_states:
-            encoder_states = encoder_states + (hidden_states,)
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
+            return tuple(v for v in [hidden_states, all_hidden_states, all_attentions] if v is not None)
 
         return DecoderOutput(
             last_hidden_states=hidden_states,
@@ -556,7 +555,9 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
         self.right_context = None
         self.chunk = None
 
-        if True:
+        self.test = False
+
+        if self.test:
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=config.hidden_size,
                 nhead=config.num_attention_heads,
@@ -571,7 +572,6 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
             self.encoder = nn.TransformerEncoder(encoder_layer, config.encoder_layers)
             self.head_size = config.num_attention_heads
         else:
-            config.position_embedding_type = "no"
             encoder_layers = [TransformerTransducerEncoderLayer(config) for _ in range(config.encoder_layers)]
             self.layers = nn.ModuleList(encoder_layers)
             self.layerdrop = config.encoder_layerdrop
@@ -705,8 +705,8 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
         position_vector = self.position_embeddings(position_ids)
         hidden_states = input_features + position_vector
 
-        if True:
-
+        if self.test:
+            # for test
             if attention_mask is not None:
                 # pytorch transformer를 위해 만든 곳, pytorch transformer는 bsz * head_size임
                 attention_mask = attention_mask.squeeze(1)
@@ -717,7 +717,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
             hidden_states = self.encoder(hidden_states, attention_mask.bool())
             attentions = None
         else:
-            encoder_states = () if output_hidden_states else None
+            all_hidden_states = () if output_hidden_states else None
             all_attentions = () if output_attentions else None
             if head_mask is not None:
                 if head_mask.size()[0] != (len(self.layers)):
@@ -728,7 +728,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
 
             for idx, encoder_layer in enumerate(self.layers):
                 if output_hidden_states:
-                    encoder_states = encoder_states + (hidden_states,)
+                    all_hidden_states = all_hidden_states + (hidden_states,)
                 # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
                 dropout_probability = random.uniform(0, 1)
                 if self.training and (dropout_probability < self.layerdrop):  # skip the layer
@@ -762,7 +762,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
                     attentions = all_attentions + (layer_outputs[1],)
 
             if output_hidden_states:
-                encoder_states = encoder_states + (hidden_states,)
+                all_hidden_states = all_hidden_states + (hidden_states,)
 
         if not return_dict:
             return None

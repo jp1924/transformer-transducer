@@ -19,7 +19,7 @@ class TransducerProcessor(ProcessorMixin):
         tokenizer ([`PreTrainedTokenizer`]):
             An instance of [`PreTrainedTokenizer`]. The tokenizer is a required input.
     """
-    feature_extractor_class = "Wav2Vec2FeatureExtractor"
+    feature_extractor_class = "TransducerFeatureExtractor"
     tokenizer_class = "AutoTokenizer"
 
     def __init__(self, feature_extractor, tokenizer):

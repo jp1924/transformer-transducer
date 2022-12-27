@@ -49,7 +49,7 @@ class TransducerCollator:
         features: list = feature_select("input_features")
         labels: list = feature_select("labels")
 
-        features = [{"input_features": self.extractor.mel_compressor(mel)} for mel in features]
+        features = [{"input_features": mel} for mel in features]
         labels = [{"input_ids": add_blank(label)} for label in labels]
 
         batch = self.extractor.pad(

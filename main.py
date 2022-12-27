@@ -9,6 +9,7 @@ import datasets
 import numpy as np
 import soundfile as sf
 import torch
+from torch.optim import AdamW
 from data import TransducerCollator, TransducerFeatureExtractor, TransducerTokenizer
 from evaluate import load
 from model import TransformerTranducerForRNNT, TransformerTransducerConfig
@@ -16,15 +17,13 @@ from setproctitle import setproctitle
 from transformers import (
     HfArgumentParser,
     Seq2SeqTrainer,
-    Wav2Vec2CTCTokenizer,
-    Wav2Vec2Tokenizer,
     set_seed,
-    BertForSequenceClassification,
-    BertConfig,
 )
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
-from utils import DataArguments, ModelArguments, TransducerTrainArgument
+from utils import DataArguments, ModelArguments, TransducerTrainArgument, TriStageLRScheduler
+
+from trainer import TransducerTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +68,9 @@ def main(parser: HfArgumentParser) -> None:
 
         # outout: [shape(time_seq, mel_seq), ...]
         log_mel = extractor.log_mel_transform(raw_audio, do_numpy=True)
+        log_mel = extractor.mel_compressor(log_mel[0])
         int_txt = tokenizer.encode(str_txt)
 
-        log_mel = log_mel[0]
         time_len = len(log_mel)
 
         processing_result = {
@@ -88,17 +87,22 @@ def main(parser: HfArgumentParser) -> None:
         data = datasets.concatenate_datasets(concat_group)
 
         cache_file_name = f"{data_args.data_name}_{data_type}.arrow"
+        cache_save_path = os.path.join(model_args.cache_dir, data_args.data_name, data_type, cache_file_name)
+
+        if not os.path.exists(cache_save_path):
+            os.makedirs(cache_save_path, exist_ok=True)
+
         data = data.map(
             preprocessor,
             batch_size=1,
             desc=data_type,
             load_from_cache_file=True,
             num_proc=data_args.num_proc,
-            cache_file_name=cache_file_name,
+            cache_file_name=cache_save_path,
         )
-        data = data.rename_column("audio", "input_features")
-        data = data.rename_column("text", "labels")
 
+        data = data.rename_column("text", "labels")
+        data = data.rename_column("audio", "input_features")
         return data
 
     tokenizer = TransducerTokenizer.from_pretrained(
@@ -139,10 +143,29 @@ def main(parser: HfArgumentParser) -> None:
 
     # [TODO]: tri-stage lr scheduler추가하기
 
+    if (train_args.max_steps != -1) and True:
+        optimizer = AdamW(
+            params=model.parameters(),
+            lr=train_args.learning_rate,
+            betas=(train_args.adam_beta1, train_args.adam_beta2),
+            eps=train_args.adam_epsilon,
+            weight_decay=train_args.weight_decay,
+        )
+        tri_stage = TriStageLRScheduler(
+            model_args,
+            max_steps=train_args.max_steps,
+            learning_rate=train_args.learning_rate,
+        )
+        scheduler = tri_stage.get_tri_stage_scheduler(optimizer)
+        optimizers = (optimizer, scheduler)
+    else:
+        optimizers = (None, None)
+
     callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
-    trainer = Seq2SeqTrainer(
+    trainer = TransducerTrainer(
         model=model,
         tokenizer=tokenizer,
+        optimizers=optimizers,
         train_dataset=train_data,
         eval_dataset=valid_data,
         args=train_args,

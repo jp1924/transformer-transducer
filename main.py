@@ -2,7 +2,7 @@ import io
 import logging
 import os
 from argparse import Namespace
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from unicodedata import normalize
 
 import datasets
@@ -125,7 +125,7 @@ def main(parser: HfArgumentParser) -> None:
     train_data = data_preprocessing("train") if train_args.do_train else None
     valid_data = data_preprocessing("valid") if train_args.do_eval else None
     clean_data = data_preprocessing("clean") if train_args.do_predict else None
-    pther_data = data_preprocessing("other") if train_args.do_predict else None
+    other_data = data_preprocessing("other") if train_args.do_predict else None
 
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
     collator = TransducerCollator(
@@ -156,7 +156,8 @@ def main(parser: HfArgumentParser) -> None:
     if train_args.do_eval:
         eval(trainer, valid_data, train_args)
     if train_args.do_predict:
-        predict(trainer, test_data)
+        predict(trainer, clean_data, train_args, "clean")
+        predict(trainer, other_data, train_args, "other")
 
 
 def train(trainer: Seq2SeqTrainer, args: Namespace) -> None:
@@ -182,42 +183,49 @@ def train(trainer: Seq2SeqTrainer, args: Namespace) -> None:
             os.makedirs(save_path, exist_ok=True)
 
         metrics = outputs.metrics
-        trainer.args.output_dir = save_path
 
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_model(save_path)
 
 
-def eval(trainer: Seq2SeqTrainer, eval_data: datasets.Dataset, args: Namespace) -> None:
+def eval(trainer: Seq2SeqTrainer, dataset: datasets.Dataset, args: Namespace) -> None:
     """_eval_
         Trainer를 전달받아 Trainer.eval을 실행시키는 함수입니다.
     Args:
         trainer (Seq2SeqTrainer): Huggingface의 torch Seq2SeqTrainer를 전달받습니다.
-        eval_data (Dataset): 검증을 하기 위한 Data를 전달받습니다.
+        dataset (Dataset): 검증을 하기 위한 Data를 전달받습니다.
     """
-    metrics = trainer.evaluate(eval_data)
+    metrics = trainer.evaluate(dataset)
     if is_main_process(args.local_rank):
-        trainer.log_metrics("eval", metrics)
-        trainer.save_metrics("eval", metrics)
+        trainer.log_metrics("valid", metrics)
+        trainer.save_metrics("valid", metrics)
 
 
-def predict(trainer: Seq2SeqTrainer, test_data: datasets.Dataset) -> None:
+def predict(trainer: Seq2SeqTrainer, dataset: datasets.Dataset, args: Namespace, prefix: Optional[str] = None) -> None:
     """_predict_
         Trainer를 전달받아 Trainer.predict을 실행시키는 함수입니다.
         이때 Seq2SeqTrainer의 Predict이 실행되며 model.generator를 실행시키기 위해
         arg값의 predict_with_generater값을 강제로 True로 변환시킵니다.
     Args:
         trainer (Seq2SeqTrainer): Huggingface의 torch Seq2SeqTrainer를 전달받습니다.
-        test_data (Dataset): 검증을 하기 위한 Data를 전달받습니다.
+        dataset (Dataset): 검증을 하기 위한 Data를 전달받습니다.
         gen_kwargs (Dict[str, Any]): model.generator를 위한 값들을 전달받습니다.
     """
-    raise NotImplementedError
+    outputs = trainer.predict(dataset, key_prefix=prefix)
+    metrics = outputs.metrics
+
+    predictions = metrics.predictions
+    references = metrics.label_ids
+
+    if is_main_process(args.local_rank):
+        predictions
+        references
+
+        trainer.log_metrics(prefix, metrics)
+        trainer.save_metrics(prefix, metrics)
 
 
 if "__main__" in __name__:
     parser = HfArgumentParser([TransducerTrainArgument, DataArguments, ModelArguments])
     main(parser)
-
-14, 155, 776
-1, 572, 864

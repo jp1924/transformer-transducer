@@ -4,24 +4,24 @@ from transformers import PretrainedConfig
 class TransformerTransducerConfig(PretrainedConfig):
     def __init__(
         self,
-        vocab_size=None,
+        vocab_size=111,
         initializer_range=0.02,
-        encoder_layers=18,
+        encoder_layers=28,
         encoder_layerdrop=0.0,
-        decoder_layers=2,
+        decoder_layers=4,
         decoder_layerdrop=0.0,
-        hidden_size=320,
-        hidden_dropout=0.03,
+        hidden_size=512,
+        hidden_dropout=0.1,
         hidden_act="gelu",
         layer_norm_eps=0.00001,
         max_position_embeddings=512,
         position_embedding_type="absolute",
-        intermediate_size=640,
-        activation_dropout=0.03,
+        intermediate_size=2048,
+        activation_dropout=0.1,
+        attention_dropout=0.1,
+        num_attention_heads=8,
         attention_type="diagonal",
-        attention_dropout=0.03,
         score_dropout=0.07,
-        num_attention_heads=10,
         loss_reduction="mean",
         blank_id=0,
         clamp=-1,
@@ -56,6 +56,12 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.blank_id = blank_id
         self.clamp = clamp
         self.initializer_range = initializer_range
+
+        # spec-augment
+        self.mask_frequency_prob = 0.02
+        self.mask_frequency_length = 50
+        self.mask_time_prob = 0.1
+        self.mask_time_length = 30
 
         # for generate
 

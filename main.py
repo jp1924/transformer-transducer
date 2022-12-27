@@ -82,9 +82,10 @@ def main(parser: HfArgumentParser) -> None:
         return processing_result
 
     def data_preprocessing(data_type: str) -> datasets.Dataset:
-        data_collate: str = lambda key: [asr_data[data_name] for data_name in asr_data if key in data_name]
         logger.info(f"------------ {data_type}_data preprocessing ------------")
-        data = datasets.concatenate_datasets(data_collate(data_type))
+
+        concat_group = [asr_data.pop(data_name) for data_name in list(asr_data) if data_type in data_name]
+        data = datasets.concatenate_datasets(concat_group)
 
         cache_file_name = f"{data_args.data_name}_{data_type}.arrow"
         data = data.map(
@@ -116,7 +117,6 @@ def main(parser: HfArgumentParser) -> None:
 
     config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
     model = TransformerTranducerForRNNT(config)
-    test = [(f"{name[0]}: {param.numel()}") for name, param in zip(model.named_parameters(), model.parameters())]
 
     # [NOTE]: data load
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
@@ -124,7 +124,8 @@ def main(parser: HfArgumentParser) -> None:
     # [NOTE]: data processing
     train_data = data_preprocessing("train") if train_args.do_train else None
     valid_data = data_preprocessing("valid") if train_args.do_eval else None
-    test_data = data_preprocessing("test") if train_args.do_predict else None
+    clean_data = data_preprocessing("clean") if train_args.do_predict else None
+    pther_data = data_preprocessing("other") if train_args.do_predict else None
 
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
     collator = TransducerCollator(

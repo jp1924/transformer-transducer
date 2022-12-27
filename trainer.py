@@ -56,11 +56,12 @@ class TransducerTrainer(Seq2SeqTrainer):
 
         # [NOTE]: gaussian noise
         step = self.state.global_step
-        if step > 10000:
+        if step < 10000:
             # [NOTE]: copied from https://discuss.pytorch.org/t/is-there-any-way-to-add-noise-to-trained-weights/29829/2
             with torch.no_grad():
-                for param in model.parameters():
-                    param.add_(noise(param))
+                for param, name in zip(model.parameters(), model.named_parameters()):
+                    if "weight" in name:
+                        param.add_(noise(param))
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training

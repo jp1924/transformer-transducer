@@ -43,17 +43,17 @@ class TransducerCollator:
         self.extractor = extractor
         self.blank_id = blank_id
 
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
-        feature_select: str = lambda key: [feature[key] for feature in features]
-        input_values: list = feature_select("input_features")
+    def __call__(self, batch_dataset: List[Dict[str, Any]]) -> Dict[str, Any]:
+        feature_select: str = lambda key: [dataset[key] for dataset in batch_dataset]
+        add_blank: np.ndarray = lambda label: np.insert(label, 0, self.blank_id)[:512]
+        features: list = feature_select("input_features")
         labels: list = feature_select("labels")
 
-        input_values = self.extractor.compress_features(input_values)
-        input_values = [{"input_features": features} for features in input_values]
-        labels = [{"input_values": np.insert(label, 0, self.blank_id)[:512]} for label in labels]
+        features = [{"input_features": self.extractor.mel_compressor(mel)} for mel in features]
+        labels = [{"input_ids": add_blank(label)} for label in labels]
 
         batch = self.extractor.pad(
-            input_values,
+            features,
             padding=True,
             max_length=self.max_length,
             truncation=True,
@@ -68,7 +68,7 @@ class TransducerCollator:
             return_tensors="pt",
         )
 
-        batch["labels"] = labels["input_values"]
+        batch["labels"] = labels["input_ids"]
         batch["decoder_attention_mask"] = labels["attention_mask"]
 
         return batch

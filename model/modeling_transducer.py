@@ -881,7 +881,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
                     hidden_states = layer_outputs[0]
 
                 if output_attentions:
-                    attentions = all_attentions + (layer_outputs[1],)
+                    all_attentions = all_attentions + (layer_outputs[1],)
 
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
@@ -1045,20 +1045,22 @@ class TransducerModel(TransformerTransducerPretrainedModel):
             input_features = self.test_spec_augment(input_features)
 
         encoder_outputs = self.encoder(
-            input_features,
-            attention_mask,
-            output_attentions,
-            output_hidden_states,
-            return_dict,
+            input_features=input_features,
+            attention_mask=attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            head_mask=head_mask,
+            return_dict=return_dict,
         )
         encoder_hiddens = encoder_outputs.last_hidden_states
 
         decoder_outputs = self.decoder(
-            labels,
-            decoder_attention_mask,
-            output_attentions,
-            output_hidden_states,
-            return_dict,
+            labels=labels,
+            attention_mask=decoder_attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            head_mask=decoder_head_mask,
+            return_dict=return_dict,
         )
         decoder_hiddens = decoder_outputs.last_hidden_states
 

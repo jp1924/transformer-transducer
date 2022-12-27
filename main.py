@@ -1,24 +1,32 @@
 import io
+import logging
 import os
 from argparse import Namespace
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict
 from unicodedata import normalize
 
 import datasets
-import librosa
 import numpy as np
 import soundfile as sf
 import torch
-from data import TransducerCollator, TransducerFeatureExtractor, TransducerProcessor, TransducerTokenizer
+from data import TransducerCollator, TransducerFeatureExtractor, TransducerTokenizer
 from evaluate import load
 from model import TransformerTranducerForRNNT, TransformerTransducerConfig
 from setproctitle import setproctitle
-from transformers import HfArgumentParser, Seq2SeqTrainer, Wav2Vec2CTCTokenizer, Wav2Vec2Tokenizer, logging, set_seed
+from transformers import (
+    HfArgumentParser,
+    Seq2SeqTrainer,
+    Wav2Vec2CTCTokenizer,
+    Wav2Vec2Tokenizer,
+    set_seed,
+    BertForSequenceClassification,
+    BertConfig,
+)
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
 from utils import DataArguments, ModelArguments, TransducerTrainArgument
 
-logger = logging.get_logger("transformers")
+logger = logging.getLogger(__name__)
 
 
 def main(parser: HfArgumentParser) -> None:
@@ -59,12 +67,12 @@ def main(parser: HfArgumentParser) -> None:
         str_txt = dataset.data["text"]
         raw_audio, sr = sf.read(io.BytesIO(byte_audio))
 
-        # outout: [shape(mel_seq, time_seq), ...]
+        # outout: [shape(time_seq, mel_seq), ...]
         log_mel = extractor.log_mel_transform(raw_audio, do_numpy=True)
         int_txt = tokenizer.encode(str_txt)
 
         log_mel = log_mel[0]
-        time_len = log_mel.shape[1]
+        time_len = len(log_mel)
 
         processing_result = {
             "audio": log_mel,
@@ -82,10 +90,14 @@ def main(parser: HfArgumentParser) -> None:
         data = data.map(
             preprocessor,
             batch_size=1,
+            desc=data_type,
             load_from_cache_file=True,
             num_proc=data_args.num_proc,
             cache_file_name=cache_file_name,
         )
+        data = data.rename_column("audio", "input_features")
+        data = data.rename_column("text", "labels")
+
         return data
 
     tokenizer = TransducerTokenizer.from_pretrained(
@@ -99,17 +111,20 @@ def main(parser: HfArgumentParser) -> None:
         stack=4,
         stride=3,
     )
+    # [TODO]: 나중에 processor추가하기
     # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
 
     config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
     model = TransformerTranducerForRNNT(config)
+    test = [(f"{name[0]}: {param.numel()}") for name, param in zip(model.named_parameters(), model.parameters())]
 
     # [NOTE]: data load
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
 
+    # [NOTE]: data processing
     train_data = data_preprocessing("train") if train_args.do_train else None
     valid_data = data_preprocessing("valid") if train_args.do_eval else None
-    test_data = data_preprocessing("test") if train_args.do_test else None
+    test_data = data_preprocessing("test") if train_args.do_predict else None
 
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
     collator = TransducerCollator(
@@ -120,6 +135,8 @@ def main(parser: HfArgumentParser) -> None:
         extractor=extractor,
         blank_id=config.blank_id,
     )
+
+    # [TODO]: tri-stage lr scheduler추가하기
 
     callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
     trainer = Seq2SeqTrainer(
@@ -200,3 +217,6 @@ def predict(trainer: Seq2SeqTrainer, test_data: datasets.Dataset) -> None:
 if "__main__" in __name__:
     parser = HfArgumentParser([TransducerTrainArgument, DataArguments, ModelArguments])
     main(parser)
+
+14, 155, 776
+1, 572, 864

@@ -3,6 +3,7 @@ import math
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import Optimizer
 from typing import List, Union, Callable, Dict, Tuple
+from .noise import GaussianNoise
 
 
 class NoCalcStepLambdaLR(LambdaLR):
@@ -36,15 +37,19 @@ class TriStageLRScheduler:
                 "Cannot use a fixed learning rate schedule with tri-stage lr." " Consider --lr-scheduler=fixed instead."
             )
 
-        assert (args.warmup_step_ratio + args.hold_step_ratio + args.decay_step_ratio) == 1, "ratio의 합이 1이 되도록 설정해 주세요!"
+        assert (
+            args.ramp_up_step_ratio + args.hold_step_ratio + args.decay_step_ratio
+        ) == 1, "ratio의 합이 1이 되도록 설정해 주세요!"
 
         self.peak_learning_rate = learning_rate
         self.init_learning_rate = args.init_learning_rate * learning_rate
         self.final_learning_rate = args.final_learning_rate * learning_rate
 
-        self.warmup_steps = int(max_steps * args.warmup_step_ratio)
+        self.warmup_steps = int(max_steps * args.ramp_up_step_ratio)
         self.hold_steps = int(max_steps * args.hold_step_ratio)
         self.decay_steps = int(max_steps * args.decay_step_ratio)
+
+        self.noise = GaussianNoise(mean=0.0, std=0.01)
 
         self.warmup_rate = (
             (self.peak_learning_rate - self.init_learning_rate) / self.warmup_steps if self.warmup_steps != 0 else 0

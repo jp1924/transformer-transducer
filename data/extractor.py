@@ -158,10 +158,14 @@ class TransducerFeatureExtractor(SequenceFeatureExtractor):
 
         assert self.stack is not None or self.stride is not None, "windowing이 정상적으로 작동하지 않습니다!"
 
-    def mel_compressor(self, mel_feature: np.ndarray) -> np.ndarray:
+    def mel_compressor(self, mel_feature: Union[np.ndarray, List[List[float]]]) -> np.ndarray:
         """mel을 windowing을 적용시켜 값을 압축시킨다."""
         # [NOTE]: 여기서 각각의 멜을 windowing + padding한 뒤 나머지 compress_mel을 padding하는 방식으로 진행해야 할 듯 하다.
         #         compress_features에서 padding을 처리하지 않고 하기에는 self._pad를 overriding해서 새로 만들어야 함.
+
+        if isinstance(mel_feature, list):
+            mel_feature = np.array(mel_feature)
+
         time_steps, _ = mel_feature.shape
         expected_len = math.ceil(time_steps / self.stride)
 

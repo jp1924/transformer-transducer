@@ -56,9 +56,12 @@ def main(parser: HfArgumentParser) -> None:
         references = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
         wer_score = wer._compute(predictions, references)
+        cer_score = cer._compute(predictions, references)
 
-        result = {"wer": wer_score}
-
+        result = {
+            "wer": wer_score,
+            "cer": cer_score,
+        }
         return result
 
     def preprocessor(dataset: datasets.Dataset) -> Dict[str, Any]:
@@ -127,23 +130,16 @@ def main(parser: HfArgumentParser) -> None:
 
     # [NOTE]: data processing
     train_data = data_preprocessing("train") if train_args.do_train else None
-    valid_data = data_preprocessing("valid") if train_args.do_eval else None
     clean_data = data_preprocessing("clean") if train_args.do_predict else None
     other_data = data_preprocessing("other") if train_args.do_predict else None
+    valid_data = data_preprocessing("validation.clean") if train_args.do_eval else None
 
+    # [NOTE]: set metrics
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
-    collator = TransducerCollator(
-        tokenizer,
-        train_args.mel_max_length,
-        train_args.mel_stack,
-        train_args.window_stride,
-        extractor=extractor,
-        blank_id=config.blank_id,
-    )
+    cer = load("evaluate-metric/cer", cache_dir=model_args.cache_dir)
 
-    # [TODO]: tri-stage lr scheduler추가하기
-
-    if (train_args.max_steps != -1) and True:
+    # [NOTE]: set optimizers & scheduler
+    if train_args.max_steps != -1:
         optimizer = AdamW(
             params=model.parameters(),
             lr=train_args.learning_rate,
@@ -161,7 +157,14 @@ def main(parser: HfArgumentParser) -> None:
     else:
         optimizers = (None, None)
 
+    # [NOTE]: set Trainer
+    collator = TransducerCollator(
+        tokenizer,
+        extractor=extractor,
+        blank_id=config.blank_id,
+    )
     callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
+
     trainer = TransducerTrainer(
         model=model,
         tokenizer=tokenizer,

@@ -12,9 +12,7 @@ class TransducerCollator:
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer = None,
-        max_length=None,
-        stack=None,
-        stride=None,
+        max_length=512,
         extractor: SequenceFeatureExtractor = None,
         blank_id=0,
     ) -> None:
@@ -37,17 +35,15 @@ class TransducerCollator:
             tokenizer (PreTrainedTokenizer, optional): _description_. Defaults to None.
         """
         self.tokenizer = tokenizer
-        self.stack = stack
-        self.stride = stride
         self.max_length = max_length
         self.extractor = extractor
         self.blank_id = blank_id
 
     def __call__(self, batch_dataset: List[Dict[str, Any]]) -> Dict[str, Any]:
-        feature_select: str = lambda key: [dataset[key] for dataset in batch_dataset]
-        add_blank: np.ndarray = lambda label: np.insert(label, 0, self.blank_id)[:512]
-        features: list = feature_select("input_features")
-        labels: list = feature_select("labels")
+        add_blank: np.ndarray = lambda label: np.insert(label, 0, self.blank_id)[: self.max_length]
+
+        features: list = [dataset["input_features"] for dataset in batch_dataset]
+        labels: list = [dataset["labels"] for dataset in batch_dataset]
 
         features = [{"input_features": mel} for mel in features]
         labels = [{"input_ids": add_blank(label)} for label in labels]

@@ -25,27 +25,25 @@ pytorch
 ---
 Transformer-Transducer consists of Label Encoder in charge of text, Audio Encoder in charge of voice, and Joint Network that combines the calculations of each Encoder     
 
-In this paper, it is shown as Audio Encoder and Label Encoder,    
-but compared to Seq2Seq, Audio Encoder corresponds to Seq2Seq's Encoder and Label Encoder corresponds to Seq2Seq's Decoder   
-However, the difference from Seq2Seq is that each encoder performs Self-Attention separately and then combines the calculations in the Joint-Network      
+In this paper, it is shown as Audio Encoder and Label Encoder, but compared to Seq2Seq, Audio Encoder corresponds to Seq2Seq's Encoder and Label Encoder corresponds to Seq2Seq's Decoder. However, the difference from Seq2Seq is that each encoder performs Self-Attention separately and then combines the calculations in the Joint-Network      
 
 $Joint = Linear(AudioEncoder(x)) + Linear(LabelEncoder(Labels(z_1:(i-1))))$     
 $Softmax(Linear(tanh(Joint)))$     
 
-Joint-Network combines the results calculated by Audio Encoder and Label Encoder into one.    
-The process of extracting feature vector for audio and text from each encoder and then linking the extracted values to each other. 
+Joint-Network combines the results calculated by Audio Encoder and Label Encoder into one. The process of extracting feature vector for audio and text from each encoder and then linking the extracted values to each other. 
 
-If you look at the formula (or [code]()), you can see that the calculation result of Audio, Label Encoder passes through Lienar    
-and then goes through tanh. I guess the reason why Tanh was added is to filter the silence of the voice.    
+If you look at the formula (or [code]()), you can see that the calculation result of Audio, Label Encoder passes through Lienar and then goes through tanh. I guess the reason why Tanh was added is to filter the silence of the voice.    
 
     
-### RNN-T loss
-
 ### Evaluation step
+---
+![](/img/rnn_t.png)    
+
 RNN-T loss calculates loss using logits whose shape is 4. 
 However, for evaluation to be possible on the huggingface, the shape of the logit from the model must not exceed 3 at most
-
 Therefore, to reduce the shape, text is generated using the generate of the model during evaluation_loop
 
-RNN-T predicts text differently from CTC.
+RNN-T predicts text differently from CTC. The difference between RNN-T and CTC is that one voice frame t can predict more than one text
+
+The rules are simple. If you predict blank comes out, you do t+1 and if a random character comes out, you do +1 on u
 

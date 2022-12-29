@@ -25,9 +25,7 @@ pytorch
 ---
 Transformer-Transducer consists of Label Encoder in charge of text, Audio Encoder in charge of voice, and Joint Network that combines the calculations of each Encoder     
 
-In this paper, it is shown as Audio Encoder and Label Encoder,    
-but compared to Seq2Seq, Audio Encoder corresponds to Seq2Seq's Encoder and Label Encoder corresponds to Seq2Seq's Decoder   
-However, the difference from Seq2Seq is that each encoder performs Self-Attention separately and then combines the calculations in the Joint-Network      
+In this paper, it is shown as Audio Encoder and Label Encoder, but compared to Seq2Seq, Audio Encoder corresponds to Seq2Seq's Encoder and Label Encoder corresponds to Seq2Seq's Decoder. However, the difference from Seq2Seq is that each encoder performs Self-Attention separately and then combines the calculations in the Joint-Network      
 
 $Joint = Linear(AudioEncoder(x)) + Linear(LabelEncoder(Labels(z_1:(i-1))))$     
 $Softmax(Linear(tanh(Joint)))$     

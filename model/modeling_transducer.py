@@ -506,29 +506,11 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
         super(TransformerTransducerPretrainedModel, self).__init__(config)
         self.config = config
-        self.is_decoder = True
+        self.layerdrop = config.decoder_layerdrop
 
-        self.test = False
+        decoder_layers = [TransformerTransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
+        self.layers = nn.ModuleList(decoder_layers)
 
-        if self.test:
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=config.hidden_size,
-                nhead=config.num_attention_heads,
-                dim_feedforward=config.intermediate_size,
-                dropout=config.activation_dropout,
-                layer_norm_eps=config.layer_norm_eps,
-                batch_first=True,
-                norm_first=False,
-                device=None,
-                dtype=None,
-            )
-            self.encoder = nn.TransformerEncoder(encoder_layer, config.decoder_layers)
-            self.head_size = config.num_attention_heads
-        else:
-            decoder_layers = [TransformerTransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
-            self.layers = nn.ModuleList(decoder_layers)
-            self.layerdrop = config.decoder_layerdrop
-        # [TODO]: absolute, relative positional embedding 구현하기
         self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.word_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
@@ -673,32 +655,16 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
         super(TransformerTransducerPretrainedModel, self).__init__(config)
         self.config = config
         self.attention_type = self.config.attention_type
+        self.layerdrop = config.encoder_layerdrop
+        self.gradient_checkpointing = False
 
         self.left_context = None
         self.right_context = None
         self.chunk = None
 
-        self.test = False
+        encoder_layers = [TransformerTransducerEncoderLayer(config) for _ in range(config.encoder_layers)]
+        self.layers = nn.ModuleList(encoder_layers)
 
-        if self.test:
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=config.hidden_size,
-                nhead=config.num_attention_heads,
-                dim_feedforward=config.intermediate_size,
-                dropout=config.activation_dropout,
-                layer_norm_eps=config.layer_norm_eps,
-                batch_first=True,
-                norm_first=False,
-                device=None,
-                dtype=None,
-            )
-            self.encoder = nn.TransformerEncoder(encoder_layer, config.encoder_layers)
-            self.head_size = config.num_attention_heads
-        else:
-            encoder_layers = [TransformerTransducerEncoderLayer(config) for _ in range(config.encoder_layers)]
-            self.layers = nn.ModuleList(encoder_layers)
-            self.layerdrop = config.encoder_layerdrop
-            self.gradient_checkpointing = False
         self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
 
@@ -945,11 +911,11 @@ class TransducerModel(TransformerTransducerPretrainedModel):
         self.decoder = TransformerTransducerDecoder(config)
         self.joiner = TransformerTransducerJoiner(config)
 
-        self.freq_masking = FrequencyMasking(50)
-        self.time_masking = TimeMasking(30)
+        self.freq_masking = FrequencyMasking(config.freq_mask_size)
+        self.time_masking = TimeMasking(config.time_mask_size)
 
-        if config.mask_time_prob > 0.0 or config.mask_frequency_prob > 0.0:
-            self.masked_spec_embed = nn.Parameter(torch.FloatTensor(config.hidden_size).uniform_())
+        # if config.mask_time_prob > 0.0 or config.mask_frequency_prob > 0.0:
+        #     self.masked_spec_embed = nn.Parameter(torch.FloatTensor(config.hidden_size).uniform_())
 
     def get_encoder(self) -> nn.Module:
         return self.encoder
@@ -1006,10 +972,9 @@ class TransducerModel(TransformerTransducerPretrainedModel):
 
     def test_spec_augment(self, hidden_state) -> torch.Tensor():
 
-        for _ in range(2):
+        for _ in range(self.config.freq_apply_num):
             hidden_state = self.freq_masking(hidden_state)
-
-        for _ in range(10):
+        for _ in range(self.config.time_apply_num):
             hidden_state = self.time_masking(hidden_state)
 
         return hidden_state
@@ -1244,9 +1209,6 @@ class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
                 model_kwargs["encoder_outputs"].get("hidden_states") if output_hidden_states else None
             )
 
-        # keep track of which sequences are already finished
-        unfinished_sequences = input_features.new(input_features.shape[0]).fill_(1)
-
         this_peer_finished = False  # used by synced_gpus only
 
         # ====================
@@ -1264,7 +1226,7 @@ class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
         state_iter = enumerate(zip(encoder_state, decoder_state))
         for batch_idx, (audio_logits, decoder_state) in state_iter:
             time_idx = 0
-            repeat_max = 5
+            repeat_max = 20
             gen_sentence = input_features[batch_idx]
 
             while True:

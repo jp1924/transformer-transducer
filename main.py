@@ -130,9 +130,9 @@ def main(parser: HfArgumentParser) -> None:
 
     # [NOTE]: data processing
     train_data = data_preprocessing("train") if train_args.do_train else None
+    valid_data = data_preprocessing("validation.clean") if train_args.do_eval else None
     clean_data = data_preprocessing("clean") if train_args.do_predict else None
     other_data = data_preprocessing("other") if train_args.do_predict else None
-    valid_data = data_preprocessing("validation.clean") if train_args.do_eval else None
 
     # [NOTE]: set metrics
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)

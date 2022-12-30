@@ -463,61 +463,52 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
             inputs_embeds=position_embed,
         )
 
-        if self.test:
-            if attention_mask is not None:
-                attention_mask = attention_mask.squeeze(1)
-                attention_mask = attention_mask.repeat(self.head_size, 1, 1)
-                attention_mask = attention_mask.bool()
-            hidden_states = self.encoder(hidden_states, attention_mask)
-            all_attentions = None
-            all_hidden_states = None
-        else:
-            all_hidden_states = () if output_hidden_states else None
-            all_attentions = () if output_attentions else None
-            if head_mask is not None:
-                if head_mask.size()[0] != (len(self.layers)):
-                    raise ValueError(
-                        f"The head_mask should be specified for {len(self.layers)} layers, but it is for"
-                        f" {head_mask.size()[0]}."
-                    )
+        all_hidden_states = () if output_hidden_states else None
+        all_attentions = () if output_attentions else None
+        if head_mask is not None:
+            if head_mask.size()[0] != (len(self.layers)):
+                raise ValueError(
+                    f"The head_mask should be specified for {len(self.layers)} layers, but it is for"
+                    f" {head_mask.size()[0]}."
+                )
 
-            for idx, decoder_layer in enumerate(self.layers):
-                if output_hidden_states:
-                    all_hidden_states = all_hidden_states + (hidden_states,)
-                # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
-                dropout_probability = random.uniform(0, 1)
-                if self.training and (dropout_probability < self.layerdrop):  # skip the layer
-                    layer_outputs = (None, None)
-                else:
-                    if self.gradient_checkpointing and self.training:
-
-                        def create_custom_forward(module):
-                            def custom_forward(*inputs):
-                                return module(*inputs, output_attentions)
-
-                            return custom_forward
-
-                        layer_outputs = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(decoder_layer),
-                            hidden_states,
-                            attention_mask,
-                            (head_mask[idx] if head_mask is not None else None),
-                        )
-                    else:
-                        layer_outputs = decoder_layer(
-                            hidden_states,
-                            attention_mask,
-                            head_mask=(head_mask[idx] if head_mask is not None else None),
-                            output_attentions=output_attentions,
-                        )
-
-                    hidden_states = layer_outputs[0]
-
-                if output_attentions:
-                    all_attentions += (layer_outputs[1],)
-
+        for idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
+            # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+            dropout_probability = random.uniform(0, 1)
+            if self.training and (dropout_probability < self.layerdrop):  # skip the layer
+                layer_outputs = (None, None)
+            else:
+                if self.gradient_checkpointing and self.training:
+
+                    def create_custom_forward(module):
+                        def custom_forward(*inputs):
+                            return module(*inputs, output_attentions)
+
+                        return custom_forward
+
+                    layer_outputs = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(decoder_layer),
+                        hidden_states,
+                        attention_mask,
+                        (head_mask[idx] if head_mask is not None else None),
+                    )
+                else:
+                    layer_outputs = decoder_layer(
+                        hidden_states,
+                        attention_mask,
+                        head_mask=(head_mask[idx] if head_mask is not None else None),
+                        output_attentions=output_attentions,
+                    )
+
+                hidden_states = layer_outputs[0]
+
+            if output_attentions:
+                all_attentions += (layer_outputs[1],)
+
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
 
         if not return_dict:
             return tuple(v for v in [hidden_states, all_hidden_states, all_attentions] if v is not None)
@@ -672,64 +663,52 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
         position_vector = self.position_embeddings(position_ids)
         hidden_states = input_features + position_vector
 
-        if self.test:
-            # for test
-            if attention_mask is not None:
-                # pytorch transformer를 위해 만든 곳, pytorch transformer는 bsz * head_size임
-                attention_mask = attention_mask.squeeze(1)
-                attention_mask = attention_mask.repeat(self.head_size, 1, 1)
-                # [NOTE]: if full attention일 경우
-                # attention_mask = attention_mask.repeat(1, attention_mask.shape[2], 1)
+        all_hidden_states = () if output_hidden_states else None
+        all_attentions = () if output_attentions else None
+        if head_mask is not None:
+            if head_mask.size()[0] != (len(self.layers)):
+                raise ValueError(
+                    f"The head_mask should be specified for {len(self.layers)} layers, but it is for"
+                    f" {head_mask.size()[0]}."
+                )
 
-            hidden_states = self.encoder(hidden_states, attention_mask.bool())
-            attentions = None
-        else:
-            all_hidden_states = () if output_hidden_states else None
-            all_attentions = () if output_attentions else None
-            if head_mask is not None:
-                if head_mask.size()[0] != (len(self.layers)):
-                    raise ValueError(
-                        f"The head_mask should be specified for {len(self.layers)} layers, but it is for"
-                        f" {head_mask.size()[0]}."
-                    )
-
-            for idx, encoder_layer in enumerate(self.layers):
-                if output_hidden_states:
-                    all_hidden_states = all_hidden_states + (hidden_states,)
-                # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
-                dropout_probability = random.uniform(0, 1)
-                if self.training and (dropout_probability < self.layerdrop):  # skip the layer
-                    layer_outputs = (None, None)
-                else:
-                    if self.gradient_checkpointing and self.training:
-
-                        def create_custom_forward(module):
-                            def custom_forward(*inputs):
-                                return module(*inputs, output_attentions)
-
-                            return custom_forward
-
-                        layer_outputs = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(encoder_layer),
-                            hidden_states,
-                            attention_mask,
-                            (head_mask[idx] if head_mask is not None else None),
-                        )
-                    else:
-                        layer_outputs = encoder_layer(
-                            hidden_states,
-                            attention_mask,
-                            head_mask=(head_mask[idx] if head_mask is not None else None),
-                            output_attentions=output_attentions,
-                        )
-
-                    hidden_states = layer_outputs[0]
-
-                if output_attentions:
-                    all_attentions = all_attentions + (layer_outputs[1],)
-
+        for idx, encoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
+            # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+            dropout_probability = random.uniform(0, 1)
+            if self.training and (dropout_probability < self.layerdrop):  # skip the layer
+                layer_outputs = (None, None)
+            else:
+                if self.gradient_checkpointing and self.training:
+
+                    def create_custom_forward(module):
+                        def custom_forward(*inputs):
+                            return module(*inputs, output_attentions)
+
+                        return custom_forward
+
+                    layer_outputs = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(encoder_layer),
+                        hidden_states,
+                        attention_mask,
+                        (head_mask[idx] if head_mask is not None else None),
+                    )
+                else:
+                    layer_outputs = encoder_layer(
+                        hidden_states,
+                        attention_mask,
+                        head_mask=(head_mask[idx] if head_mask is not None else None),
+                        output_attentions=output_attentions,
+                    )
+
+                hidden_states = layer_outputs[0]
+
+            if output_attentions:
+                all_attentions = all_attentions + (layer_outputs[1],)
+
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
 
         if not return_dict:
             return None
@@ -891,7 +870,7 @@ class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
         self.log_softmax = nn.LogSoftmax(dim=-1)
 
         self.reduction = config.loss_reduction
-        self.blank_id = config.blank_id
+        self.blk_token_id = config.blk_token_id
         self.loss_clamp = config.clamp
 
         self.post_init()
@@ -959,7 +938,7 @@ class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
             targets=non_blank_labels,
             target_lengths=label_lengths,
             logit_lengths=feature_lengths,
-            blank=self.blank_id,
+            blank=self.blk_token_id,
             clamp=self.loss_clamp,
             reduction=self.reduction,
         )
@@ -1058,7 +1037,6 @@ class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
         state_iter = enumerate(zip(encoder_state, decoder_state))
         for batch_idx, (audio_logits, decoder_state) in state_iter:
             time_idx = 0
-            repeat_max = 20
             gen_sentence = input_features[batch_idx]
 
             while True:
@@ -1087,7 +1065,8 @@ class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
                 next_token = torch.argmax(next_tokens_scores)
                 next_token_score = next_tokens_scores[next_token]
 
-                if next_token == self.blank_id or repeat_count == repeat_max:
+                repeat_check = repeat_count == self.config.generate_repeat_max
+                if next_token == self.blk_token_id or repeat_check:
                     time_idx += 1
                     repeat_count = 0
                     continue

@@ -58,10 +58,11 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.initializer_range = initializer_range
 
         # spec-augment
-        self.mask_frequency_prob = 0.02
-        self.mask_frequency_length = 50
-        self.mask_time_prob = 0.1
-        self.mask_time_length = 30
+        self.freq_mask_size = 50
+        self.time_mask_size = 30
+
+        self.freq_apply_num = 2
+        self.time_apply_num = 10
 
         # for generate
 

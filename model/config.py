@@ -23,9 +23,20 @@ class TransformerTransducerConfig(PretrainedConfig):
         attention_type="diagonal",
         score_dropout=0.07,
         loss_reduction="mean",
-        blank_id=0,
         clamp=-1,
         decoder_start_token_id=0,
+        freq_mask_size=50,
+        time_mask_size=30,
+        freq_apply_num=2,
+        time_apply_num=10,
+        bos_token_id=0,
+        blk_token_id=0,
+        eos_token_id=2,
+        pad_token_id=1,
+        generate_repeat_max=30,
+        output_attentions=False,
+        output_hidden_states=False,
+        is_encoder_decoder=True,
         **kwargs
     ) -> None:
         super().__init__(**kwargs)
@@ -53,27 +64,28 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.position_embedding_type = position_embedding_type
 
         self.loss_reduction = loss_reduction
-        self.blank_id = blank_id
         self.clamp = clamp
         self.initializer_range = initializer_range
 
-        # spec-augment
-        self.freq_mask_size = 50
-        self.time_mask_size = 30
+        self.blk_token_id = blk_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.pad_token_id = pad_token_id
 
-        self.freq_apply_num = 2
-        self.time_apply_num = 10
+        self.output_attentions = output_attentions
+        self.output_hidden_states = output_hidden_states
+        self.is_encoder_decoder = is_encoder_decoder
+
+        # spec-augment
+        self.freq_mask_size = freq_mask_size
+        self.time_mask_size = time_mask_size
+        self.freq_apply_num = freq_apply_num
+        self.time_apply_num = time_apply_num
 
         # for generate
+        self.generate_repeat_max = generate_repeat_max
 
-        self.bos_token_id = 1
-        self.eos_token_id = 2
-        self.pad_token_id = 0
         self.pruned_heads = {}
-        self.output_attentions = False
-        self.output_hidden_states = False
-        self.is_encoder_decoder = True
-
         self.num_return_sequences = 1
         self.early_stopping = True
         self.length_penalty = 1.0

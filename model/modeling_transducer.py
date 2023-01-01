@@ -703,13 +703,11 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
                     )
 
                 hidden_states = layer_outputs[0]
-
             if output_attentions:
                 all_attentions = all_attentions + (layer_outputs[1],)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
-
         if not return_dict:
             return None
 
@@ -724,8 +722,8 @@ class TransformerTransducerJoiner(nn.Module):
     def __init__(self, config: PretrainedConfig) -> None:
         super().__init__()
 
-        self.audio_linear = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.label_linear = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.encoder_linear = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.decoder_linear = nn.Linear(config.hidden_size, config.intermediate_size)
         self.tanh = nn.Tanh()
         self.dense = nn.Linear(config.intermediate_size, config.vocab_size)
 
@@ -743,8 +741,8 @@ class TransformerTransducerJoiner(nn.Module):
             # [NOTE]: huggingface의 attention_mask 생성에서 위와 같은 방법이 사용됨
             #         그리고 차원이 몇 차원인지 간접적으로 알려줄 수 있을 거라 생각해 사용함
 
-        encoder_hiddens = self.audio_linear(encoder_hiddens)
-        decoder_hiddens = self.label_linear(decoder_hiddens)
+        encoder_hiddens = self.encoder_linear(encoder_hiddens)
+        decoder_hiddens = self.decoder_linear(decoder_hiddens)
 
         joint_hiddens = encoder_hiddens + decoder_hiddens
         joint_hiddens = self.tanh(joint_hiddens)

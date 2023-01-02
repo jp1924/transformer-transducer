@@ -3,6 +3,10 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ModelArguments:
+    model_name_or_path: str = field(
+        default=None,
+        metadata={"help": "사전학습된 모델의 local 경로 혹은 hub의 이름을 설정합니다."},
+    )
     cache_dir: str = field(
         default="./cache",
         metadata={"help": "모델 혹은 데이터를 저장할 캐쉬의 경로를 지정합니다."},

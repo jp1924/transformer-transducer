@@ -9,7 +9,6 @@ import torch.nn as nn
 
 if is_apex_available():
     from apex import amp
-
 if is_sagemaker_mp_enabled():
     import smdistributed.modelparallel.torch as smp
     from smdistributed.modelparallel import __version__ as SMP_VERSION
@@ -53,15 +52,16 @@ class TransducerTrainer(Seq2SeqTrainer):
 
         with self.compute_loss_context_manager():
             loss = self.compute_loss(model, inputs)
-
-        # [NOTE]: gaussian noise
-        step = self.state.global_step
-        if step > 10000 and self.model.training:
-            # [NOTE]: copied from https://discuss.pytorch.org/t/is-there-any-way-to-add-noise-to-trained-weights/29829/2
-            with torch.no_grad():
-                for param, name in zip(model.parameters(), model.named_parameters()):
-                    if "weight" in name:
-                        param.add_(noise(param))
+        """
+            # [NOTE]: gaussian noise
+            step = self.state.global_step
+            if (step > 10000 and self.model.training) and False:
+                # [NOTE]: copied from https://discuss.pytorch.org/t/is-there-any-way-to-add-noise-to-trained-weights/29829/2
+                with torch.no_grad():
+                    for param, name in zip(model.parameters(), model.named_parameters()):
+                        if "weight" in name:
+                            param.add_(noise(param))        
+        """
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -69,16 +69,18 @@ class TransducerTrainer(Seq2SeqTrainer):
         if self.args.gradient_accumulation_steps > 1 and not self.deepspeed:
             # deepspeed handles loss scaling by gradient_accumulation_steps in its `backward`
             loss = loss / self.args.gradient_accumulation_steps
-
-        if self.do_grad_scaling:
-            self.scaler.scale(loss).backward()
-        elif self.use_apex:
-            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                scaled_loss.backward()
-        elif self.deepspeed:
-            # loss gets scaled under gradient_accumulation_steps in deepspeed
-            loss = self.deepspeed.backward(loss)
-        else:
-            loss.backward()
+        try:
+            if self.do_grad_scaling:
+                self.scaler.scale(loss).backward()
+            elif self.use_apex:
+                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            elif self.deepspeed:
+                # loss gets scaled under gradient_accumulation_steps in deepspeed
+                loss = self.deepspeed.backward(loss)
+            else:
+                loss.backward()
+        except:
+            print(inputs)
 
         return loss.detach()

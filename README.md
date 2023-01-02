@@ -25,7 +25,7 @@ pytorch
 - Transformer-Transducer is a an End2End-based ASR streaming model that converts spoken speech into text in real time.
 - Transformer-Transducer is a model that implements RNN-T as Transformer and train using RNN-T loss.
 - It consists of Label Encoder in charge of text, Audio Encoder in charge of voice, and Joint Network that combines the calculations of each Encoder   
-- And in order not to exceed the max_length of the Transformer, the audio is converted into log-Mel Spectrogram, and then each Mel is stacked is stacked to match the voice within the max_length
+- And in order not to exceed the max_length of the Transformer, the audio is converted into log-Mel Spectrogram, and then each Mel is stacked to match the voice within the max_length
 - The authors of the paper trained the model by 200K steps with a batch-size of 1024 at 8x8 TPU.
 
 ## Transformer Transducer

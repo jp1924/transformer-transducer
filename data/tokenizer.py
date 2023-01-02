@@ -145,8 +145,7 @@ class TransducerTokenizer(PreTrainedTokenizer):
         eos_token="</s>",
         unk_token="<unk>",
         pad_token="<pad>",
-        word_delimiter_token="|",
-        replace_word_delimiter_char=" ",
+        word_delimiter_token=" ",
         do_lower_case=False,
         **kwargs,
     ):
@@ -155,16 +154,12 @@ class TransducerTokenizer(PreTrainedTokenizer):
             bos_token=bos_token,
             eos_token=eos_token,
             pad_token=pad_token,
-            do_lower_case=do_lower_case,
             word_delimiter_token=word_delimiter_token,
-            replace_word_delimiter_char=replace_word_delimiter_char,
+            do_lower_case=do_lower_case,
             **kwargs,
         )
-
         self._word_delimiter_token = word_delimiter_token
-
         self.do_lower_case = do_lower_case
-        self.replace_word_delimiter_char = replace_word_delimiter_char
 
         with open(vocab_file, encoding="utf-8") as vocab_handle:
             self.encoder = json.load(vocab_handle)
@@ -220,7 +215,7 @@ class TransducerTokenizer(PreTrainedTokenizer):
         if self.do_lower_case:
             text = text.upper()
 
-        return list(text.replace(" ", self.word_delimiter_token))
+        return list(text)
 
     def _convert_token_to_id(self, token: str) -> int:
         """Converts a token (str) in an index (integer) using the vocab."""
@@ -353,11 +348,6 @@ class TransducerTokenizer(PreTrainedTokenizer):
         self,
         token_ids: List[int],
         skip_special_tokens: bool = False,
-        clean_up_tokenization_spaces: bool = True,
-        group_tokens: bool = True,
-        spaces_between_special_tokens: bool = False,
-        output_word_offsets: Optional[bool] = False,
-        output_char_offsets: Optional[bool] = False,
     ) -> str:
         """
         special _decode function is needed for Wav2Vec2Tokenizer because added tokens should be treated exactly the
@@ -367,25 +357,6 @@ class TransducerTokenizer(PreTrainedTokenizer):
         filtered_tokens = self.convert_ids_to_tokens(token_ids, skip_special_tokens=skip_special_tokens)
 
         # [XXX]: BERT-Tokenizer를 사용할 지, Wav2Vec2-Tokenizer를 사용할 지 고민임, 이건 임시
-        # result = []
-        # for token in filtered_tokens:
-        #     if skip_special_tokens and token in self.all_special_ids:
-        #         continue
-        #     result.append(token)
-
-        # string_output = self.convert_tokens_to_string(
-        #     result,
-        #     group_tokens=group_tokens,
-        #     spaces_between_special_tokens=spaces_between_special_tokens,
-        #     output_word_offsets=output_word_offsets,
-        #     output_char_offsets=output_char_offsets,
-        # )
-
-        # text = string_output["text"]
-
-        # if clean_up_tokenization_spaces:
-        #     text = self.clean_up_tokenization(text)
-
         return "".join(filtered_tokens).strip()
 
     # overwritten from `tokenization_utils_base.py` because tokenizer can output

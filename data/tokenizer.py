@@ -348,6 +348,11 @@ class TransducerTokenizer(PreTrainedTokenizer):
         self,
         token_ids: List[int],
         skip_special_tokens: bool = False,
+        clean_up_tokenization_spaces: bool = True,
+        group_tokens: bool = True,
+        spaces_between_special_tokens: bool = False,
+        output_word_offsets: Optional[bool] = False,
+        output_char_offsets: Optional[bool] = False,
     ) -> str:
         """
         special _decode function is needed for Wav2Vec2Tokenizer because added tokens should be treated exactly the

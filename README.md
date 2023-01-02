@@ -6,7 +6,6 @@ I referred to the repo below to make this.
 - [huggingface/transformers](https://github.com/huggingface/transformers)    
 </b>     
 ## Environment
---- 
 OS: Ubuntu 18.04.6 LTS     
 python: 3.8.13      
 pytorch
@@ -14,7 +13,6 @@ pytorch
 </b>
 
 ## Abstract
----
 - Transformer-Transducer is a an End2End-based ASR streaming model that converts spoken speech into text in real time.
 - Transformer-Transducer is a model that implements RNN-T as Transformer and train using RNN-T loss.
 - It consists of Label Encoder in charge of text, Audio Encoder in charge of voice, and Joint Network that combines the calculations of each Encoder   
@@ -22,7 +20,6 @@ pytorch
 - The authors of the paper trained the model by 200K steps with a batch-size of 1024 at 8x8 TPU.
 
 ## Transformer Transducer
----
 Transformer-Transducer consists of Label Encoder in charge of text, Audio Encoder in charge of voice, and Joint Network that combines the calculations of each Encoder     
 
 In this paper, it is shown as Audio Encoder and Label Encoder, but compared to Seq2Seq, Audio Encoder corresponds to Seq2Seq's Encoder and Label Encoder corresponds to Seq2Seq's Decoder. However, the difference from Seq2Seq is that each encoder performs Self-Attention separately and then combines the calculations in the Joint-Network      
@@ -36,7 +33,6 @@ If you look at the formula (or [code]()), you can see that the calculation resul
 
     
 ### Evaluation step
----
 ![](/img/rnn_t.png)    
 
 RNN-T loss calculates loss using logits whose shape is 4. 

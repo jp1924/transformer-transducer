@@ -1,10 +1,17 @@
 # [Transformer Transducer](https://arxiv.org/abs/2002.02562)
+```
+Model works but not validated.   
+I don't know how to verify it because the paper author,   
+"train batch_size to 1024 in an environment where 64 TPU cores were set."
+```
+
 This repo is an implementation of Transformer-Transducer as a Hugging face.    
 I referred to the repo below to make this.    
 - [oshindow/Transformer-Transducer](https://github.com/oshindow/Transformer-Transducer)
 - [zzpDapeng/Transformer-Transducer](https://github.com/zzpDapeng/Transformer-Transducer)
-- [huggingface/transformers](https://github.com/huggingface/transformers)    
-</b>     
+- [huggingface/transformers](https://github.com/huggingface/transformers)  
+</b>  
+  
 ## Environment
 OS: Ubuntu 18.04.6 LTS     
 python: 3.8.13      
@@ -30,16 +37,17 @@ $Softmax(Linear(tanh(Joint)))$
 Joint-Network combines the results calculated by Audio Encoder and Label Encoder into one. The process of extracting feature vector for audio and text from each encoder and then linking the extracted values to each other. 
 
 If you look at the formula (or [code]()), you can see that the calculation result of Audio, Label Encoder passes through Lienar and then goes through tanh. I guess the reason why Tanh was added is to filter the silence of the voice.    
-
     
-### Evaluation step
+## Evaluation step
 ![](/img/rnn_t.png)    
 
 RNN-T loss calculates loss using logits whose shape is 4. 
 However, for evaluation to be possible on the huggingface, the shape of the logit from the model must not exceed 3 at most
 Therefore, to reduce the shape, text is generated using the generate of the model during evaluation_loop
 
-RNN-T predicts text differently from CTC. The difference between RNN-T and CTC is that one voice frame t can predict more than one text
+Unlike CTC, RNN-T should not be predicted using argmax at interference or validation steps.
 
-The rules are simple. If you predict blank comes out, you do t+1 and if a random character comes out, you do +1 on u
-
+The rule for RNN-T to generate text is as follows. U + 1 when text comes out, and T + 1 when blank comes out.   
+The above method should be applied to the entire process of generating text.
+If there are multiple text in the same voice frame,   
+U₂ + 1 > U₃ + 1 > U₀ + 1 > U₁ + 1 > ... may proceed until blank appears.

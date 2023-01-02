@@ -16,3 +16,7 @@ class TransducerTrainArgument(Seq2SeqTrainingArguments):
         default=3,
         metadata={"help": "windowing을 할 값을 지정합니다. mel_stack 값보다 적은 값이여 합니다. 그렇지 않으면 음성간의 연관성이 사라질 수 있습니다!"},
     )
+    vocab_path: str = field(
+        default=None,
+        metadata={"help": "이건 나중에 삭제될 거임"},
+    )

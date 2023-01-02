@@ -113,6 +113,8 @@ def main(parser: HfArgumentParser) -> None:
         load_name = train_args.resume_from_checkpoint if select_name else model_args.model_name_or_path
 
         tokenizer = TransducerTokenizer.from_pretrained(load_name, cache_dir=model_args.cache_dir)
+        encode_test = tokenizer.encode("HELLO WORLD")
+        tokenizer.decode(encode_test)
         extractor = TransducerFeatureExtractor(
             n_fft=512,
             feature_size=128,
@@ -123,10 +125,12 @@ def main(parser: HfArgumentParser) -> None:
         config = TransformerTransducerConfig.from_pretrained(load_name, cache_dir=model_args.cache_dir)
         model = TransformerTranducerForRNNT.from_pretrained(load_name, config=config, cache_dir=model_args.cache_dir)
     else:
-        tokenizer = TransducerTokenizer.from_pretrained(
-            "facebook/wav2vec2-base-960h",
-            cache_dir=model_args.cache_dir,
-        )
+        load_name = "facebook/wav2vec2-base-960h"
+        tokenizer = TransducerTokenizer.from_pretrained(load_name, cache_dir=model_args.cache_dir)
+
+        # [NOTE]: if call wav2vec2 tokenizer
+        setattr(tokenizer, "word_delimiter_token", " ")
+
         extractor = TransducerFeatureExtractor(
             n_fft=512,
             feature_size=128,

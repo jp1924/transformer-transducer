@@ -108,22 +108,37 @@ def main(parser: HfArgumentParser) -> None:
         data = data.rename_column("audio", "input_features")
         return data
 
-    tokenizer = TransducerTokenizer.from_pretrained(
-        "facebook/wav2vec2-base-960h",
-        cache_dir=model_args.cache_dir,
-    )
-    extractor = TransducerFeatureExtractor(
-        n_fft=512,
-        feature_size=128,
-        hop_length=256,
-        stack=4,
-        stride=3,
-    )
-    # [TODO]: 나중에 processor추가하기
-    # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
+    if train_args.resume_from_checkpoint or model_args.model_name_or_path:
+        select_name = train_args.resume_from_checkpoint is not None
+        load_name = train_args.resume_from_checkpoint if select_name else model_args.model_name_or_path
 
-    config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
-    model = TransformerTranducerForRNNT(config)
+        tokenizer = TransducerTokenizer.from_pretrained(load_name, cache_dir=model_args.cache_dir)
+        extractor = TransducerFeatureExtractor(
+            n_fft=512,
+            feature_size=128,
+            hop_length=256,
+            stack=4,
+            stride=3,
+        )
+        config = TransformerTransducerConfig.from_pretrained(load_name, cache_dir=model_args.cache_dir)
+        model = TransformerTranducerForRNNT.from_pretrained(load_name, config=config, cache_dir=model_args.cache_dir)
+    else:
+        tokenizer = TransducerTokenizer.from_pretrained(
+            "facebook/wav2vec2-base-960h",
+            cache_dir=model_args.cache_dir,
+        )
+        extractor = TransducerFeatureExtractor(
+            n_fft=512,
+            feature_size=128,
+            hop_length=256,
+            stack=4,
+            stride=3,
+        )
+        # [TODO]: 나중에 processor추가하기
+        # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
+
+        config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
+        model = TransformerTranducerForRNNT(config)
 
     # [NOTE]: data load
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
@@ -164,7 +179,6 @@ def main(parser: HfArgumentParser) -> None:
         blank_id=config.blk_token_id,
     )
     callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
-
     trainer = TransducerTrainer(
         model=model,
         tokenizer=tokenizer,

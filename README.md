@@ -3,6 +3,8 @@
 Model works but not validated.   
 I don't know how to verify it because the paper author,   
 "train batch_size to 1024 in an environment where 64 TPU cores were set."
+
+I'm still working on it
 ```
 
 This repo is an implementation of Transformer-Transducer as a Hugging face.    

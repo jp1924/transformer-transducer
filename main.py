@@ -131,24 +131,6 @@ def main(parser: HfArgumentParser) -> None:
             stack=data_args.mel_stack,
             stride=data_args.window_stride,
         )
-        extractor = TransducerFeatureExtractor(
-            n_fft=512,
-            feature_size=128,
-            hop_length=256,
-            stack=4,
-            stride=3,
-        )
-        config = TransformerTransducerConfig.from_pretrained(load_name, cache_dir=model_args.cache_dir)
-        model = TransformerTranducerForRNNT.from_pretrained(load_name, config=config, cache_dir=model_args.cache_dir)
-    else:
-        tokenizer = TransducerTokenizer.from_pretrained(train_args.vocab_path, cache_dir=model_args.cache_dir)
-        extractor = TransducerFeatureExtractor(
-            n_fft=512,
-            feature_size=128,
-            hop_length=256,
-            stack=4,
-            stride=3,
-        )
         # [TODO]: 나중에 processor추가하기
         # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
 

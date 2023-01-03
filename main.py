@@ -114,6 +114,24 @@ def main(parser: HfArgumentParser) -> None:
 
         tokenizer = TransducerTokenizer.from_pretrained(load_name, cache_dir=model_args.cache_dir)
         extractor = TransducerFeatureExtractor(
+            n_fft=data_args.num_fourier,
+            feature_size=data_args.mel_shape,
+            hop_length=data_args.hop_length,
+            stack=data_args.mel_stack,
+            stride=data_args.window_stride,
+        )
+        config = TransformerTransducerConfig.from_pretrained(load_name, cache_dir=model_args.cache_dir)
+        model = TransformerTranducerForRNNT.from_pretrained(load_name, config=config, cache_dir=model_args.cache_dir)
+    else:
+        tokenizer = TransducerTokenizer.from_pretrained(train_args.vocab_path, cache_dir=model_args.cache_dir)
+        extractor = TransducerFeatureExtractor(
+            n_fft=data_args.num_fourier,
+            feature_size=data_args.mel_shape,
+            hop_length=data_args.hop_length,
+            stack=data_args.mel_stack,
+            stride=data_args.window_stride,
+        )
+        extractor = TransducerFeatureExtractor(
             n_fft=512,
             feature_size=128,
             hop_length=256,

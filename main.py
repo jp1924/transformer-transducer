@@ -113,8 +113,6 @@ def main(parser: HfArgumentParser) -> None:
         load_name = train_args.resume_from_checkpoint if select_name else model_args.model_name_or_path
 
         tokenizer = TransducerTokenizer.from_pretrained(load_name, cache_dir=model_args.cache_dir)
-        encode_test = tokenizer.encode("HELLO WORLD")
-        tokenizer.decode(encode_test)
         extractor = TransducerFeatureExtractor(
             n_fft=512,
             feature_size=128,

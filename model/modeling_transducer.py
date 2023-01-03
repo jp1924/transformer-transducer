@@ -110,7 +110,8 @@ class TransformerTransducerPretrainedModel(PreTrainedModel):
     base_model_prefix = "transformertransducer"
     main_input_name = "input_features"
     _keys_to_ignore_on_load_missing = [r"position_ids"]
-    supports_gradient_checkpointing = True
+    supports_gradient_checkpointing = False
+    # im not sure, model can support gradient_checkpointing. it's need expriments
 
     def _init_weights(self, module) -> None:
         """Initialize the weights"""
@@ -477,10 +478,10 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
                 all_hidden_states = all_hidden_states + (hidden_states,)
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             dropout_probability = random.uniform(0, 1)
-            if self.training and (dropout_probability < self.layerdrop):  # skip the layer
+            if (self.training and (dropout_probability < self.layerdrop)) and False:  # skip the layer
                 layer_outputs = (None, None)
             else:
-                if self.gradient_checkpointing and self.training:
+                if (self.gradient_checkpointing and self.training) and False:
 
                     def create_custom_forward(module):
                         def custom_forward(*inputs):
@@ -575,6 +576,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
             # extended_attention_mask = extended_attention_mask == 0
         elif self.attention_type == "original_full":  # from BigBird Model
             # extended_attention_mask[:, None, :, :] 여기에서 차원이 추가되서 4차원이 됨
+            # [BUG]: full attention시 ValueError: Attention mask should be of size (2, 1, 321, 321), but is torch.Size([2, 1, 1, 321]) 와 같은 에러가 발생함.
             extended_attention_mask = attention_mask[:, None, :]
         else:
             # [TODO]: 나중에 영어로 작성할 것
@@ -677,10 +679,10 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
                 all_hidden_states = all_hidden_states + (hidden_states,)
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             dropout_probability = random.uniform(0, 1)
-            if self.training and (dropout_probability < self.layerdrop):  # skip the layer
+            if (self.training and (dropout_probability < self.layerdrop)) and False:  # skip the layer
                 layer_outputs = (None, None)
             else:
-                if self.gradient_checkpointing and self.training:
+                if (self.gradient_checkpointing and self.training) and False:
 
                     def create_custom_forward(module):
                         def custom_forward(*inputs):
@@ -928,8 +930,6 @@ class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
         feature_lengths = feature_lengths if feature_lengths else attention_mask.sum(-1, dtype=torch.int32)
         label_lengths = label_lengths if label_lengths else decoder_attention_mask.sum(-1, dtype=torch.int32)
         label_lengths = label_lengths - 1
-
-        non_blank_labels = non_blank_labels.to(torch.int32)
 
         loss = rnnt_loss(
             logits=log_prob,

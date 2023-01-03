@@ -1,7 +1,8 @@
+import math
 import random
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union, List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -113,7 +114,7 @@ class TransformerTransducerPretrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = False
     # im not sure, model can support gradient_checkpointing. it's need expriments
 
-    def _init_weights(self, module) -> None:
+    def _init_weights(self, module: nn.Module) -> None:
         """Initialize the weights"""
         if isinstance(module, nn.Linear):
             # Slightly different from the TF version which uses truncated_normal for initialization
@@ -129,88 +130,83 @@ class TransformerTransducerPretrainedModel(PreTrainedModel):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
-    def _set_gradient_checkpointing(self, module, value=False) -> None:
+    def _set_gradient_checkpointing(self, module: nn.Module, value: bool = False) -> None:
         if isinstance(module, TransformerTransducerEncoderLayer):
             module.gradient_checkpointing = value
 
 
-class TransformerTransducerSelfAttention(nn.Module):
-    def __init__(self, config: PretrainedConfig, position_embedding_type=None) -> None:
+# [NOTE]: copied from BertSelfAttention
+class TransformerTransducerAttention(nn.Module):
+    def __init__(self, config: PretrainedConfig, position_embedding_type: Optional[str] = None):
         super().__init__()
-        # [NOTE]: BART attention layer를 참고해서 만들었다.
-        #         이유: Wav2Vec2도 BART attention을 참고해서 만들었기 때문에
-        self.num_heads = config.num_attention_heads
-        self.embed_dim = config.hidden_size
-        self.head_dim = self.embed_dim // self.num_heads
-
-        if (self.head_dim * self.num_heads) != self.embed_dim:
+        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
-                f" and `num_heads`: {self.num_heads})."
+                f"The hidden size ({config.hidden_size}) is not a multiple of the number of attention "
+                f"heads ({config.num_attention_heads})"
             )
-        self.scaling = self.head_dim**-0.5
 
-        # [NOTE]: 일반 BART attention module은 Linear layer의 bias 설정 여부를 매개변수로 설정할 수 있도록 만들어 놨었음
-        #         왜 그렇게 만들었는지는 모르겠지만 Transformer 특정상 bias는 무조건 필요하다고 하기 때문에 bias는 삭제함.
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+        self.scale = math.sqrt(self.attention_head_size)
 
+        self.query = nn.Linear(config.hidden_size, self.all_head_size)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+        self.out_proj = nn.Linear(config.hidden_size, config.hidden_size)
+
+        self.softmax = nn.Softmax(dim=-1)
+
+        # attention_probs_dropout_prob > attention_dropout
         self.dropout = nn.Dropout(config.attention_dropout)
-
-        # [XXX]]: bert의 positional encoding을 추가시킴, 하지만 이 positional encoding이 어떤 영향을 미칠 지 모르기 때문에 테스트가 필요함
         self.position_embedding_type = position_embedding_type or getattr(config, "position_embedding_type", "absolute")
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             self.max_position_embeddings = config.max_position_embeddings
             self.distance_embedding = nn.Embedding(2 * config.max_position_embeddings - 1, self.attention_head_size)
+
         self.is_decoder = config.is_decoder
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(new_x_shape)
+        return x.permute(0, 2, 1, 3)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        key_value_states: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
         head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        """Input shape: Batch x Time x Channel"""
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+    ) -> Tuple[torch.Tensor]:
+        mixed_query_layer = self.query(hidden_states)
 
-        bsz, tgt_len, _ = hidden_states.size()
+        # If this is instantiated as a cross-attention module, the keys
+        # and values come from an encoder; the attention mask needs to be
+        # such that the encoder's padding tokens are not attended to.
+        is_cross_attention = encoder_hidden_states is not None
 
-        # get query proj
-        query_states = self.q_proj(hidden_states) * self.scaling
-
-        # [NOTE]: BART Attention에 있던 Prefix tuning을 위한 구문은 삭제함.
-        #         streming모델에서 사용할 가능성이 보이지 않았기 때문,
-
-        #         decoder에서는 사용될 수 있나??? 그건 잘 모르겠다. 다만
-        #         prefix-tuning의 특징 상 streming에 적용시키기 어려울 듯
-
-        # if key_value_states are provided this layer is used as a cross-attention layer
-        # for the decoder
-        is_cross_attention = key_value_states is not None
-        if is_cross_attention:
-            # cross_attentions
-            key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
-            value_states = self._shape(self.v_proj(key_value_states), -1, bsz)
+        if is_cross_attention and past_key_value is not None:
+            # reuse k,v, cross_attentions
+            key_layer = past_key_value[0]
+            value_layer = past_key_value[1]
+            attention_mask = encoder_attention_mask
+        elif is_cross_attention:
+            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
+            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
+            attention_mask = encoder_attention_mask
         elif past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+            key_layer = self.transpose_for_scores(self.key(hidden_states))
+            value_layer = self.transpose_for_scores(self.value(hidden_states))
+            key_layer = torch.cat([past_key_value[0], key_layer], dim=2)
+            value_layer = torch.cat([past_key_value[1], value_layer], dim=2)
         else:
-            # self_attention
-            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+            key_layer = self.transpose_for_scores(self.key(hidden_states))
+            value_layer = self.transpose_for_scores(self.value(hidden_states))
 
-        # [TODO]: Transducer 계열의 모델들은 encoder, decoder를 다양하게 조합해서 진행하기 때문에
-        #         이후 cross-attention이 사용될 가능성이 있음. 나중에 Cross-attention이 가능하도록 코드를 작성할 것
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+
         if self.is_decoder:
             # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
             # Further calls to cross_attention layer can then reuse all cross-attention
@@ -219,90 +215,55 @@ class TransformerTransducerSelfAttention(nn.Module):
             # all previous decoder key/value_states. Further calls to uni-directional self-attention
             # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
             # if encoder bi-directional self-attention `past_key_value` is always `None`
-            past_key_value = (key_states, value_states)
+            past_key_value = (key_layer, value_layer)
 
-        proj_shape = (bsz * self.num_heads, -1, self.head_dim)
-        query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
-        key_states = key_states.view(*proj_shape)
-        value_states = value_states.view(*proj_shape)
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
 
-        src_len = key_states.size(1)
-        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
-
-        # [XXX]: Bert positional_embedding, 테스트 해보고 성능에 긍정적인 영향을 미치면 bert로 갈아탈 것
-        use_cache = past_key_value is not None
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
-            query_length, key_length = query_states.shape[2], key_states.shape[2]
-            if use_cache:
-                position_ids_l = torch.tensor(key_length - 1, dtype=torch.long, device=hidden_states.device).view(-1, 1)
-            else:
-                position_ids_l = torch.arange(query_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
-            position_ids_r = torch.arange(key_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
+            seq_length = hidden_states.size()[1]
+            position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+            position_ids_r = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
             distance = position_ids_l - position_ids_r
-
             positional_embedding = self.distance_embedding(distance + self.max_position_embeddings - 1)
-            positional_embedding = positional_embedding.to(dtype=query_states.dtype)  # fp16 compatibility
+            positional_embedding = positional_embedding.to(dtype=query_layer.dtype)  # fp16 compatibility
 
             if self.position_embedding_type == "relative_key":
-                relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_states, positional_embedding)
-                attention_scores = attn_weights + relative_position_scores
+                relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
+                attention_scores = attention_scores + relative_position_scores
             elif self.position_embedding_type == "relative_key_query":
-                relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_states, positional_embedding)
-                relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_states, positional_embedding)
+                relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
+                relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_layer, positional_embedding)
                 attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
-        if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is"
-                f" {attn_weights.size()}"
-            )
+
+        attention_scores = attention_scores / self.scale
         if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, tgt_len, src_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is {attention_mask.size()}"
-                )
-            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + attention_mask
-            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+            attention_scores = attention_scores + attention_mask
 
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
+        # Normalize the attention scores to probabilities.
+        attention_probs = self.softmax(attention_scores)
 
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        # Mask heads if we want to
         if head_mask is not None:
-            if head_mask.size() != (self.num_heads,):
-                raise ValueError(
-                    f"Head mask for a single layer should be of size {(self.num_heads,)}, but is" f" {head_mask.size()}"
-                )
-            attn_weights = head_mask.view(1, -1, 1, 1) * attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-        if output_attentions:
-            # this operation is a bit awkward, but it's required to
-            # make sure that attn_weights keeps its gradient.
-            # In order to do so, attn_weights have to be reshaped
-            # twice and have to be reused in the following
-            attn_weights_reshaped = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-            attn_weights = attn_weights_reshaped.view(bsz * self.num_heads, tgt_len, src_len)
-        else:
-            attn_weights_reshaped = None
+            attention_probs = attention_probs * head_mask
 
-        # [NOTE]: 이 층은 아래의 self.dropout으로 바뀜
-        # attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        context_layer = torch.matmul(attention_probs, value_layer)
 
-        attn_probs = self.dropout(attn_weights)
-        attn_output = torch.bmm(attn_probs, value_states)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
 
-        if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
+        context_layer = context_layer.view(new_context_layer_shape)
+        context_layer = self.out_proj(context_layer)
 
-        attn_output = attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
-        attn_output = attn_output.transpose(1, 2)
-
-        # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
-        # partitioned aross GPUs when using tensor-parallelism.
-        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
-        attn_output = self.out_proj(attn_output)
-
-        return attn_output, attn_weights_reshaped, past_key_value
+        # [XXX]: just copied from bart attention output,
+        #        It is not intuitive to return to the tuple, so I modified it as below.
+        #        it can be modified at any time depending on the situation.
+        return context_layer, attention_probs, past_key_value
 
 
 class TransformerTransducerFeedForward(nn.Module):
@@ -335,37 +296,98 @@ class TransformerTransducerEncoderLayer(nn.Module):
     def __init__(self, config: PretrainedConfig) -> None:
         super().__init__()
 
-        self.attention = TransformerTransducerSelfAttention(config)
+        self.self_attention = TransformerTransducerAttention(config)
         self.feed_forward = TransformerTransducerFeedForward(config)
 
         self.dropout = nn.Dropout(config.hidden_dropout)
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
+        self.is_decoder = config.is_decoder
+        self.add_cross_attention = config.add_cross_attention
+        if self.add_cross_attention:
+            if not self.is_decoder:
+                raise ValueError(f"{self} should be used as a decoder model if cross attention is added")
+            self.cross_attention = TransformerTransducerAttention(config, position_embedding_type="absolute")
+
+    def run_cross_attention(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        attention_residual = hidden_states
+
+        # [TODO]: 나중에 clean code하기
+        hidden_states, attn_weights, cross_attn_past_key_value = self.cross_attention(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            head_mask=head_mask,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            past_key_value=past_key_value,
+        )
+
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = attention_residual + hidden_states
+        hidden_states = self.layer_norm(hidden_states)
+
+        return hidden_states, attn_weights, cross_attn_past_key_value
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
+        self_head_mask: Optional[torch.Tensor] = None,
+        cross_head_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = True,
     ) -> Tuple[torch.Tensor]:
         # [NOTE}: wav2vec2 + bert encoder layer를 참고해서 만들었음.
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
 
         attention_residual = hidden_states
-        hidden_states, attn_weights, _ = self.attention(
+        hidden_states, attn_weights, past_key_value = self.self_attention(
             hidden_states,
             attention_mask,
-            head_mask=head_mask,
+            head_mask=self_head_mask,
             output_attentions=output_attentions,
             past_key_value=self_attn_past_key_value,
         )
-        hidden_states = hidden_states[0]
+        # 이게 왜 있는거지????????????????????
+        # [TODO]: 나중에 무조건 삭제할 것!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        # hidden_states = hidden_states[0]
 
         hidden_states = self.dropout(hidden_states)
         hidden_states = attention_residual + hidden_states
         hidden_states = self.layer_norm(hidden_states)
+
+        # [TODO]: cross attention은 아직 테스트 하지 않음 나중에 테스트 할 것
+        # [XXX]: cross attention의 검증 여부에 따라 사용할 지 말지가 결정될 듯 함.
+        cross_attn_present_key_value = None
+        if self.is_decoder and encoder_hidden_states is not None:
+            if not hasattr(self, "cross_attention"):
+                raise ValueError(
+                    f"If `encoder_hidden_states` are passed, {self} has to be instantiated with cross-attention layers"
+                    " by setting `config.add_cross_attention=True`"
+                )
+            cross_attn_past_key_value = past_key_value[-2:] if past_key_value is not None else None
+
+            hidden_states, cross_attn_weights, cross_attn_present_key_value = self.run_cross_attention(
+                attention=hidden_states,
+                attention_mask=attention_mask,
+                head_mask=cross_head_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                past_key_value=cross_attn_past_key_value,
+            )
+            past_key_value = past_key_value + cross_attn_present_key_value
 
         hidden_states = self.layer_norm(hidden_states)
         hidden_states = hidden_states + self.feed_forward(hidden_states)
@@ -374,7 +396,10 @@ class TransformerTransducerEncoderLayer(nn.Module):
         outputs = (hidden_states,)
 
         if output_attentions:
-            outputs += (attn_weights,)
+            outputs += (attn_weights, cross_attn_weights)
+
+        if use_cache:
+            outputs += (past_key_value,)
 
         return outputs
 
@@ -433,13 +458,17 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
         self,
         labels: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_attention_mask: Optional[torch.LongTensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = True,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        cross_attn_head_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
-        use_cache: Optional[bool] = None,
+        use_cache: Optional[bool] = False,
+        return_dict: Optional[bool] = True,
     ) -> Union[EncoderOutput, Tuple[Any]]:
-
+        # Transformer-Transducer의 Encoder, Decoder는 Cross attention을 진행하지 않는다.
         attentions_flag = output_attentions is not None
         output_attentions = output_attentions if attentions_flag else self.config.output_attentions
 
@@ -466,6 +495,8 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
 
         all_hidden_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
+        all_cross_attentions = () if (output_attentions and encoder_hidden_states is not None) else None
+        next_decoder_cache = () if use_cache else None
         if head_mask is not None:
             if head_mask.size()[0] != (len(self.layers)):
                 raise ValueError(
@@ -505,12 +536,22 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
 
                 hidden_states = layer_outputs[0]
 
+                if use_cache:
+                    next_decoder_cache += (layer_outputs[3 if output_attentions else 1],)
+
+                if output_attentions:
+                    all_attentions += (layer_outputs[1],)
+
+                    if encoder_hidden_states is not None:
+                        all_cross_attentions += (layer_outputs[2],)
+
             if output_attentions:
                 all_attentions += (layer_outputs[1],)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
+        next_cache = next_decoder_cache if use_cache else None
         if not return_dict:
             return tuple(v for v in [hidden_states, all_hidden_states, all_attentions] if v is not None)
 
@@ -646,6 +687,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
         head_mask: Optional[torch.Tensor] = None,
+        use_cache: Optional[bool] = False,
     ) -> Union[EncoderOutput, Tuple[Any]]:
         attentions_flag = output_attentions is not None
         output_attentions = output_attentions if attentions_flag else self.config.output_attentions
@@ -655,6 +697,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
 
         return_flag = return_dict is not None
         return_dict = return_dict if return_flag else self.config.use_return_dict
+        all_cross_attentions = () if (output_attentions and self.is_decoder) else None
 
         # [TODO]: attention_mask에 dtype 설정되도록 하기
         feature_shape = input_features.size()

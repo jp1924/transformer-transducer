@@ -108,32 +108,23 @@ def main(parser: HfArgumentParser) -> None:
         data = data.rename_column("audio", "input_features")
         return data
 
-    if train_args.resume_from_checkpoint or model_args.model_name_or_path:
-        select_name = train_args.resume_from_checkpoint is not None
-        load_name = train_args.resume_from_checkpoint if select_name else model_args.model_name_or_path
+    load_name = train_args.resume_from_checkpoint or model_args.model_name_or_path
+    tokenizer_name = train_args.vocab_path or load_name
 
-        tokenizer = TransducerTokenizer.from_pretrained(load_name, cache_dir=model_args.cache_dir)
-        extractor = TransducerFeatureExtractor(
-            n_fft=data_args.num_fourier,
-            feature_size=data_args.mel_shape,
-            hop_length=data_args.hop_length,
-            stack=data_args.mel_stack,
-            stride=data_args.window_stride,
-        )
+    tokenizer = TransducerTokenizer.from_pretrained(tokenizer_name, cache_dir=model_args.cache_dir)
+    extractor = TransducerFeatureExtractor(
+        n_fft=data_args.num_fourier,
+        feature_size=data_args.mel_shape,
+        hop_length=data_args.hop_length,
+        stack=data_args.mel_stack,
+        stride=data_args.window_stride,
+    )
+    # [TODO]: 나중에 processor추가하기
+    # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
+    if load_name:
         config = TransformerTransducerConfig.from_pretrained(load_name, cache_dir=model_args.cache_dir)
         model = TransformerTranducerForRNNT.from_pretrained(load_name, config=config, cache_dir=model_args.cache_dir)
     else:
-        tokenizer = TransducerTokenizer.from_pretrained(train_args.vocab_path, cache_dir=model_args.cache_dir)
-        extractor = TransducerFeatureExtractor(
-            n_fft=data_args.num_fourier,
-            feature_size=data_args.mel_shape,
-            hop_length=data_args.hop_length,
-            stack=data_args.mel_stack,
-            stride=data_args.window_stride,
-        )
-        # [TODO]: 나중에 processor추가하기
-        # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
-
         config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
         model = TransformerTranducerForRNNT(config)
 

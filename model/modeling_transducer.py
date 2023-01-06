@@ -479,7 +479,7 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
             if self_head_mask.size()[0] != (len(self.layers)):
                 raise ValueError(
                     f"The head_mask should be specified for {len(self.layers)} layers, but it is for"
-                    f" {head_mask.size()[0]}."
+                    f" {self_head_mask.size()[0]}."
                 )
 
         for idx, decoder_layer in enumerate(self.layers):

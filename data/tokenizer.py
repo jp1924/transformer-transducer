@@ -105,7 +105,7 @@ WAV2VEC2_KWARGS_DOCSTRING = r"""
 
 
 # [NOTE]: copied from Wav2Vec2Tokenizer
-class TransducerTokenizer(PreTrainedTokenizer):
+class TransformerTransducerTokenizer(PreTrainedTokenizer):
     """
     Constructs a Wav2Vec2CTC tokenizer.
 

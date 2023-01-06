@@ -1,14 +1,11 @@
 import math
-from typing import List, Optional, Union, Callable
 import warnings
-
+from typing import Callable, List, Optional, Union
 
 import numpy as np
-from numpy.fft import fft
 import torch
-
+from numpy.fft import fft
 from transformers.file_utils import is_torchaudio_available
-
 
 if is_torchaudio_available():
     from torchaudio.transforms import MelSpectrogram, Spectrogram
@@ -17,7 +14,6 @@ if is_torchaudio_available():
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.utils import TensorType, logging
-
 
 logger = logging.get_logger(__name__)
 
@@ -92,7 +88,7 @@ def mel_to_hz(mels: np.ndarray, mel_scale: str = "htk") -> np.ndarray:
 
 # [NOTE]: copied from whisper extractor
 #         It can be driven by pytorch or numpy.
-class TransducerFeatureExtractor(SequenceFeatureExtractor):
+class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
     model_input_names = ["input_features", "attention_mask"]
 
     # feature_size: 128, n_fft: 512, hop_length: 256(win_length(n_fft) / 2)

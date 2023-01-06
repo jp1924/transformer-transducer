@@ -1,11 +1,11 @@
 import warnings
 from transformers import ProcessorMixin
-from .extractor import TransducerFeatureExtractor
-from .tokenizer import TransducerTokenizer
+from .extractor import TransformerTransducerFeatureExtractor
+from .tokenizer import TransformerTransducerTokenizer
 from contextlib import contextmanager
 
 
-class TransducerProcessor(ProcessorMixin):
+class TransformerTransducerProcessor(ProcessorMixin):
     r"""
     Constructs a Wav2Vec2 processor which wraps a Wav2Vec2 feature extractor and a Wav2Vec2 CTC tokenizer into a single
     processor.
@@ -40,8 +40,14 @@ class TransducerProcessor(ProcessorMixin):
                 FutureWarning,
             )
 
-            feature_extractor = TransducerFeatureExtractor.from_pretrained(pretrained_model_name_or_path, **kwargs)
-            tokenizer = TransducerTokenizer.from_pretrained(pretrained_model_name_or_path, **kwargs)
+            feature_extractor = TransformerTransducerFeatureExtractor.from_pretrained(
+                pretrained_model_name_or_path,
+                **kwargs,
+            )
+            tokenizer = TransformerTransducerTokenizer.from_pretrained(
+                pretrained_model_name_or_path,
+                **kwargs,
+            )
 
             return cls(feature_extractor=feature_extractor, tokenizer=tokenizer)
 

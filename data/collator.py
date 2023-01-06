@@ -1,12 +1,11 @@
-from transformers import PreTrainedTokenizer
-import torch
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
 import numpy as np
-import math
+from transformers import PreTrainedTokenizer
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 
 
-class TransducerCollator:
+class TransformerTransducerCollator:
     max_length: int = 400
 
     def __init__(

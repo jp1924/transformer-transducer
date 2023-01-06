@@ -1,2 +1,2 @@
 from .config import TransformerTransducerConfig
-from .modeling_transducer import TransformerTranducerForRNNT
+from .modeling_transducer import TransformerTransducerForRNNT, TransformerTransducerPretrainedModel, TransformerTransducerModel

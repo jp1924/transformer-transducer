@@ -9,21 +9,16 @@ import datasets
 import numpy as np
 import soundfile as sf
 import torch
-from torch.optim import AdamW
-from data import TransducerCollator, TransducerFeatureExtractor, TransducerTokenizer
+from data import TransformerTransducerCollator, TransformerTransducerFeatureExtractor, TransformerTransducerTokenizer
 from evaluate import load
-from model import TransformerTranducerForRNNT, TransformerTransducerConfig
+from model import TransformerTransducerForRNNT, TransformerTransducerConfig
 from setproctitle import setproctitle
-from transformers import (
-    HfArgumentParser,
-    Seq2SeqTrainer,
-    set_seed,
-)
+from torch.optim import AdamW
+from trainer import TransducerTrainer
+from transformers import HfArgumentParser, Seq2SeqTrainer, set_seed
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
 from utils import DataArguments, ModelArguments, TransducerTrainArgument, TriStageLRScheduler
-
-from trainer import TransducerTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +106,8 @@ def main(parser: HfArgumentParser) -> None:
     load_name = train_args.resume_from_checkpoint or model_args.model_name_or_path
     tokenizer_name = train_args.vocab_path or load_name
 
-    tokenizer = TransducerTokenizer.from_pretrained(tokenizer_name, cache_dir=model_args.cache_dir)
-    extractor = TransducerFeatureExtractor(
+    tokenizer = TransformerTransducerTokenizer.from_pretrained(tokenizer_name, cache_dir=model_args.cache_dir)
+    extractor = TransformerTransducerFeatureExtractor(
         n_fft=data_args.num_fourier,
         feature_size=data_args.mel_shape,
         hop_length=data_args.hop_length,
@@ -123,10 +118,10 @@ def main(parser: HfArgumentParser) -> None:
     # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
     if load_name:
         config = TransformerTransducerConfig.from_pretrained(load_name, cache_dir=model_args.cache_dir)
-        model = TransformerTranducerForRNNT.from_pretrained(load_name, config=config, cache_dir=model_args.cache_dir)
+        model = TransformerTransducerForRNNT.from_pretrained(load_name, cache_dir=model_args.cache_dir, config=config)
     else:
         config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
-        model = TransformerTranducerForRNNT(config)
+        model = TransformerTransducerForRNNT(config)
 
     # [NOTE]: data load
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
@@ -161,7 +156,7 @@ def main(parser: HfArgumentParser) -> None:
         optimizers = (None, None)
 
     # [NOTE]: set Trainer
-    collator = TransducerCollator(
+    collator = TransformerTransducerCollator(
         tokenizer,
         extractor=extractor,
         blank_id=config.blk_token_id,

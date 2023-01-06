@@ -779,7 +779,7 @@ class TransformerTransducerJoiner(nn.Module):
         )
 
 
-class TransducerModel(TransformerTransducerPretrainedModel):
+class TransformerTransducerModel(TransformerTransducerPretrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
         super(TransformerTransducerPretrainedModel, self).__init__(config)
         self.config = config
@@ -880,12 +880,12 @@ class TransducerModel(TransformerTransducerPretrainedModel):
         )
 
 
-class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
+class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
         super().__init__(config)
         self.config = config
 
-        self.transducer = TransducerModel(config)
+        self.transducer = TransformerTransducerModel(config)
         self.log_softmax = nn.LogSoftmax(dim=-1)
         self.rnnt_loss = RNNTLoss(
             blank=config.blk_token_id,

@@ -23,10 +23,6 @@ class ModelArguments:
         default=0.0,
         metadata={"help": "tri-stage의 decay step의 비율을 설정합니다."},
     )
-    init_learning_rate: float = field(
-        default=0.0,
-        metadata={"help": "tri-stage의 시작 lr값을 설정합니다."},
-    )
     final_learning_rate: float = field(
         default=0.0,
         metadata={"help": "tri-stage의 끛 lr값을 설정합니다."},

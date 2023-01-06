@@ -10,8 +10,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torchaudio.functional import rnnt_loss
-from torchaudio.transforms import FrequencyMasking, TimeMasking
+from torchaudio.transforms import FrequencyMasking, TimeMasking, RNNTLoss
 from transformers import PretrainedConfig
 from transformers.activations import ACT2FN
 from transformers.generation_logits_process import LogitsProcessorList
@@ -670,7 +669,6 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
         head_mask: Optional[torch.Tensor] = None,
-        use_cache: Optional[bool] = False,
     ) -> Union[EncoderOutput, Tuple[Any]]:
         attentions_flag = output_attentions is not None
         output_attentions = output_attentions if attentions_flag else self.config.output_attentions
@@ -680,7 +678,6 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
 
         return_flag = return_dict is not None
         return_dict = return_dict if return_flag else self.config.use_return_dict
-        all_cross_attentions = () if (output_attentions and self.is_decoder) else None
 
         # [TODO]: attention_mask에 dtype 설정되도록 하기
         feature_shape = input_features.size()
@@ -894,11 +891,11 @@ class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
 
         self.transducer = TransducerModel(config)
         self.log_softmax = nn.LogSoftmax(dim=-1)
-
-        self.reduction = config.loss_reduction
-        self.blk_token_id = config.blk_token_id
-        self.loss_clamp = config.clamp
-
+        self.rnnt_loss = RNNTLoss(
+            blank=config.blk_token_id,
+            clamp=config.clamp,
+            reduction=config.loss_reduction,
+        )
         self.post_init()
 
     def get_encoder(self) -> nn.Module:
@@ -957,21 +954,18 @@ class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
         label_lengths = label_lengths if label_lengths else decoder_attention_mask.sum(-1, dtype=torch.int32)
         label_lengths = label_lengths - 1
 
-        loss = rnnt_loss(
+        loss = self.rnnt_loss(
             logits=log_prob,
             targets=non_blank_labels,
             target_lengths=label_lengths,
             logit_lengths=feature_lengths,
-            blank=self.blk_token_id,
-            clamp=self.loss_clamp,
-            reduction=self.reduction,
         )
 
         # [TODO]: beamsearch 테스트를 위해 넣어둔 코드, 나중에 삭제할 것!
         # self.test_beam_search(transducer_outputs.audio_last_hidden_state[0])
         # [NOTE]: transformer-transducer는 메모리를 많이 차지하기 때문에 임시로 empty_cache를 진행함
         #         torch profiler를 이용해 값을 확인할 것
-        # torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
 
         if not return_dict:
             return None
@@ -1090,7 +1084,7 @@ class TransformerTranducerForRNNT(TransformerTransducerPretrainedModel):
                 next_token_score = next_tokens_scores[next_token]
 
                 repeat_check = repeat_count == self.config.generate_repeat_max
-                if next_token == self.blk_token_id or repeat_check:
+                if next_token == self.config.blk_token_id or repeat_check:
                     time_idx += 1
                     repeat_count = 0
                     continue

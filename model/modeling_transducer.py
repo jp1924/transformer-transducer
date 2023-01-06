@@ -487,10 +487,10 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
                 all_hidden_states = all_hidden_states + (hidden_states,)
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             dropout_probability = random.uniform(0, 1)
-            if (self.training and (dropout_probability < self.layerdrop)) and False:  # skip the layer
+            if self.training and (dropout_probability < self.layerdrop):  # skip the layer
                 layer_outputs = (None, None)
             else:
-                if (self.gradient_checkpointing and self.training) and False:
+                if self.gradient_checkpointing and self.training:
 
                     def create_custom_forward(module):
                         def custom_forward(*inputs):
@@ -595,11 +595,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
                 left_context=10,
                 right_context=3,
             )
-            # [TODO]: 나중에 huggingface encoder 사용할 때 제거할 것!!!
-            # extended_attention_mask = extended_attention_mask == 0
         elif self.attention_type == "original_full":  # from BigBird Model
-            # extended_attention_mask[:, None, :, :] 여기에서 차원이 추가되서 4차원이 됨
-            # [BUG]: full attention시 ValueError: Attention mask should be of size (2, 1, 321, 321), but is torch.Size([2, 1, 1, 321]) 와 같은 에러가 발생함.
             extended_attention_mask = attention_mask[:, None, :]
         else:
             # [TODO]: 나중에 영어로 작성할 것
@@ -702,10 +698,10 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
                 all_hidden_states = all_hidden_states + (hidden_states,)
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             dropout_probability = random.uniform(0, 1)
-            if (self.training and (dropout_probability < self.layerdrop)) and False:  # skip the layer
+            if self.training and (dropout_probability < self.layerdrop):  # skip the layer
                 layer_outputs = (None, None)
             else:
-                if (self.gradient_checkpointing and self.training) and False:
+                if self.gradient_checkpointing and self.training:
 
                     def create_custom_forward(module):
                         def custom_forward(*inputs):

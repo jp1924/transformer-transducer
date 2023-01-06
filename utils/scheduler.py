@@ -1,88 +1,75 @@
 import math
+from typing import Tuple, Union
 
-from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import Optimizer
-from typing import List, Union, Callable, Dict, Tuple
-from .noise import GaussianNoise
-
-
-class NoCalcStepLambdaLR(LambdaLR):
-    def __init__(
-        self,
-        optimizer: Optimizer,
-        lr_lambda: Union[Callable[[int], float], List[Callable[[int], float]]],
-        last_epoch: int = ...,
-    ) -> None:
-        super().__init__(optimizer, lr_lambda, last_epoch)
-
-    def get_lr(self) -> float:
-        super().get_lr()
-        # [NOTE]: deleted ``base_lr * lmbda(self.last_epoch)``
-        #         The ``base_lr * lmbda(self.last_epoch)`` part was deleted to match the value of fairseq's tri-stage scheduler.
-        return [lmbda(self.last_epoch) for lmbda in self.lr_lambdas]
+from torch.optim.lr_scheduler import LambdaLR
 
 
 # [NOTE]: copied from https://github.com/facebookresearch/fairseq/blob/main/fairseq/optim/lr_scheduler/tri_stage_lr_scheduler.py
-class TriStageLRScheduler:
-    """TriStageLRScheduler
+def get_tri_stage_scheduler_with_warmup(
+    optimizer: Optimizer,
+    num_training_steps: int,
+    final_lr: float,
+    num_warmup_steps: Union[int, float],
+    num_hold_steps: Union[int, float],
+    num_decay_steps: Union[int, float],
+    last_epoch: int = -1,
+) -> LambdaLR:
+    """doc"""
+    default_lr = optimizer.defaults["lr"]
 
-    낮은 러닝레이트(init_learning_rate로 계산)에서 리니어처럼 증가하여, hold 까지 증가하며,
-    final_learning_rate까지 log 감쇠하는 러닝레이트 스케쥴러이다.
-    step으로 각각의 stage 수를 조절할 수 있으며, 좀만 응용하면 cosine과 같이 만들 수도 있다.
-    """
+    check_warmup_type = isinstance(num_warmup_steps, int)
+    warmup_steps = num_warmup_steps if check_warmup_type else num_warmup_steps * num_training_steps
 
-    def __init__(self, args: Dict, max_steps: int, learning_rate: float = 1e-5) -> None:
-        if learning_rate > 1:
-            raise ValueError(
-                "Cannot use a fixed learning rate schedule with tri-stage lr." " Consider --lr-scheduler=fixed instead."
-            )
+    check_hold_type = isinstance(num_hold_steps, int)
+    hold_steps = num_hold_steps if check_hold_type else num_hold_steps * num_training_steps
 
-        assert (
-            args.ramp_up_step_ratio + args.hold_step_ratio + args.decay_step_ratio
-        ) == 1, "ratio의 합이 1이 되도록 설정해 주세요!"
+    check_decay_type = isinstance(num_decay_steps, int)
+    decay_steps = num_decay_steps if check_decay_type else num_decay_steps * num_training_steps
 
-        self.peak_learning_rate = learning_rate
-        self.init_learning_rate = args.init_learning_rate * learning_rate
-        self.final_learning_rate = args.final_learning_rate * learning_rate
-
-        self.warmup_steps = int(max_steps * args.ramp_up_step_ratio)
-        self.hold_steps = int(max_steps * args.hold_step_ratio)
-        self.decay_steps = int(max_steps * args.decay_step_ratio)
-
-        self.noise = GaussianNoise(mean=0.0, std=0.01)
-
-        self.warmup_rate = (
-            (self.peak_learning_rate - self.init_learning_rate) / self.warmup_steps if self.warmup_steps != 0 else 0
+    if not (warmup_steps + hold_steps + decay_steps) <= num_training_steps:
+        raise ValueError(
+            f"""must don't exceed max_steps or epoch. but lr steps exceed max_step, please setting again
+            num_training_steps: {num_training_steps}, warmup_steps: {warmup_steps}, hold_steps: {hold_steps}, decay_steps: {decay_steps}"""
         )
-        self.decay_factor = -math.log(args.final_learning_rate) / self.decay_steps
 
-    def _decide_stage(self, step: int) -> Tuple[int, int]:
-        if step < self.warmup_steps:  # warmup state (or ramped up)
-            return 0, step
-        offset = self.warmup_steps
+    warmup_factpr = default_lr / warmup_steps
+    decay_factor = -math.log(final_lr) / decay_steps
 
-        if step < offset + self.hold_steps:  # hold stage
-            return 1, step - offset
-        offset += self.hold_steps
+    def _decide_stage(step: int) -> Tuple[int, int]:
+        # [NOTE]: warmup(rampup) stage
+        if step < warmup_steps:
+            return ("warm", step)
+        offset = warmup_steps
 
-        if step <= offset + self.decay_steps:  # decay stage
-            return 2, step - offset
-        offset += self.decay_steps
+        # [NOTE]: hold stage
+        if step < offset + hold_steps:
+            return ("hold", step - offset)
+        offset += hold_steps
 
-        return 3, step - offset
+        # [NOTE]: decay stage
+        if step <= offset + decay_steps:
+            return ("decay", step - offset)
 
-    def get_tri_stage_scheduler(self, optimizer: object, last_epoch: int = -1) -> NoCalcStepLambdaLR:
-        def lr_lambda(current_step: int):
-            stage, step = self._decide_stage(current_step)
-            if stage == 0:
-                learning_rate = self.init_learning_rate + self.warmup_rate * step
-            elif stage == 1:
-                learning_rate = self.peak_learning_rate
-            elif stage == 2:
-                learning_rate = self.peak_learning_rate * math.exp(-self.decay_factor * step)
-            elif stage == 3:
-                learning_rate = self.final_learning_rate
+        # [NOTE]: over stage
+        return "over", step - offset
 
-            return learning_rate
+    def lr_lambda(current_step: int) -> float:
+        stage, step = _decide_stage(current_step)
+        if "warm" == stage:
+            compensator = (current_step if current_step else 1) * default_lr
+            learning_rate = (warmup_factpr * step) + compensator
+        elif "hold" == stage:
+            compensator = default_lr
+            learning_rate = default_lr**compensator
+        elif "decay" == stage:
+            compensator = default_lr
+            learning_rate = (default_lr**compensator) * math.exp(-decay_factor * step)
+        elif "over" == stage:
+            learning_rate = final_lr
+        else:
+            raise NotImplementedError()
 
-        return NoCalcStepLambdaLR(optimizer, lr_lambda, last_epoch)
+        return learning_rate
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)

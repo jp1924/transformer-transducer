@@ -3,22 +3,21 @@ import logging
 import os
 from argparse import Namespace
 from typing import Any, Dict, Optional
-from unicodedata import normalize
 
 import datasets
 import numpy as np
 import soundfile as sf
-import torch
+import torch  # it's for debugging
 from data import TransformerTransducerCollator, TransformerTransducerFeatureExtractor, TransformerTransducerTokenizer
 from evaluate import load
-from model import TransformerTransducerForRNNT, TransformerTransducerConfig
+from model import TransformerTransducerConfig, TransformerTransducerForRNNT
 from setproctitle import setproctitle
 from torch.optim import AdamW
 from trainer import TransducerTrainer
 from transformers import HfArgumentParser, Seq2SeqTrainer, set_seed
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
-from utils import DataArguments, ModelArguments, TransducerTrainArgument, TriStageLRScheduler
+from utils import DataArguments, ModelArguments, TransducerTrainArgument, get_tri_stage_scheduler_with_warmup
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +28,7 @@ def main(parser: HfArgumentParser) -> None:
     set_seed(train_args.seed)
 
     def metrics(evaluation_result: EvalPrediction) -> Dict[str, float]:
-        """_metrics_
-            evaluation과정에서 모델의 성능을 측정하기 위한 metric을 수행하는 함수 입니다.
-            이 함수는 Trainer에 의해 실행되며 Huggingface의 Evaluate 페키로 부터
-            각종 metric을 전달받아 계산한 뒤 결과를 반환합니다.
-        Args:
-            evaluation_result (EvalPrediction): Trainer.evaluation_loop에서 model을 통해 계산된
-            logits과 label을 전달받습니다.
-        Returns:
-            Dict[str, float]: metrics 계산결과를 dict로 반환합니다.
-        """
+        """doc"""
 
         result = dict()
 
@@ -60,15 +50,17 @@ def main(parser: HfArgumentParser) -> None:
         return result
 
     def preprocessor(dataset: datasets.Dataset) -> Dict[str, Any]:
+        """doc"""
         byte_audio = dataset.data["audio"]["bytes"]
         str_txt = dataset.data["text"]
         raw_audio, sr = sf.read(io.BytesIO(byte_audio))
 
-        # outout: [shape(time_seq, mel_seq), ...]
+        # [NOTE]: outout is [shape(time_seq, mel_seq), ...]
         log_mel = extractor.log_mel_transform(raw_audio, do_numpy=True)
         log_mel = extractor.mel_compressor(log_mel[0])
         int_txt = tokenizer.encode(str_txt)
 
+        # [NOTE]: length for sampler
         time_len = len(log_mel)
 
         processing_result = {
@@ -79,6 +71,7 @@ def main(parser: HfArgumentParser) -> None:
         return processing_result
 
     def data_preprocessing(data_type: str) -> datasets.Dataset:
+        """doc"""
         logger.info(f"------------ {data_type}_data preprocessing ------------")
 
         concat_group = [asr_data.pop(data_name) for data_name in list(asr_data) if data_type in data_name]
@@ -106,6 +99,7 @@ def main(parser: HfArgumentParser) -> None:
     load_name = train_args.resume_from_checkpoint or model_args.model_name_or_path
     tokenizer_name = train_args.vocab_path or load_name
 
+    logger.info("\n----set tokenizer & extractor")
     tokenizer = TransformerTransducerTokenizer.from_pretrained(tokenizer_name, cache_dir=model_args.cache_dir)
     extractor = TransformerTransducerFeatureExtractor(
         n_fft=data_args.num_fourier,
@@ -114,8 +108,10 @@ def main(parser: HfArgumentParser) -> None:
         stack=data_args.mel_stack,
         stride=data_args.window_stride,
     )
-    # [TODO]: 나중에 processor추가하기
+    # [NOTE]: process does not worked, it not added transformers init
     # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
+
+    logger.info("\n----set model & config")
     if load_name:
         config = TransformerTransducerConfig.from_pretrained(load_name, cache_dir=model_args.cache_dir)
         model = TransformerTransducerForRNNT.from_pretrained(load_name, cache_dir=model_args.cache_dir, config=config)
@@ -123,20 +119,21 @@ def main(parser: HfArgumentParser) -> None:
         config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
         model = TransformerTransducerForRNNT(config)
 
-    # [NOTE]: data load
+    logger.info("\n----load data")
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
 
-    # [NOTE]: data processing
+    logger.info("\n----data preprocessing")
     train_data = data_preprocessing("train") if train_args.do_train else None
+    # [XXX: !!it's concated clean & other valid data!!
     valid_data = data_preprocessing("valid") if train_args.do_eval else None
     clean_data = data_preprocessing("clean") if train_args.do_predict else None
     other_data = data_preprocessing("other") if train_args.do_predict else None
 
-    # [NOTE]: set metrics
+    logger.info("\n----load metrics")
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
     cer = load("evaluate-metric/cer", cache_dir=model_args.cache_dir)
 
-    # [NOTE]: set optimizers & scheduler
+    logger.info("\n----set optimizer & scheduler")
     if train_args.max_steps != -1:
         optimizer = AdamW(
             params=model.parameters(),
@@ -145,17 +142,19 @@ def main(parser: HfArgumentParser) -> None:
             eps=train_args.adam_epsilon,
             weight_decay=train_args.weight_decay,
         )
-        tri_stage = TriStageLRScheduler(
-            model_args,
-            max_steps=train_args.max_steps,
-            learning_rate=train_args.learning_rate,
+        scheduler = get_tri_stage_scheduler_with_warmup(
+            optimizer=optimizer,
+            num_training_steps=train_args.max_steps,
+            final_lr=train_args.final_learning_rate,
+            num_warmup_steps=train_args.ramp_up_step_ratio,
+            num_hold_steps=train_args.hold_step_ratio,
+            num_decay_steps=train_args.decay_step_ratio,
         )
-        scheduler = tri_stage.get_tri_stage_scheduler(optimizer)
         optimizers = (optimizer, scheduler)
     else:
         optimizers = (None, None)
 
-    # [NOTE]: set Trainer
+    logger.info("\n----set trainer")
     collator = TransformerTransducerCollator(
         tokenizer,
         extractor=extractor,
@@ -175,26 +174,21 @@ def main(parser: HfArgumentParser) -> None:
     )
 
     if train_args.do_train:
+        logger.info("\n----run train")
+        if train_args.do_fist_predict:
+            predict()
         train(trainer, train_args)
     if train_args.do_eval:
+        logger.info("\n----run eval")
         eval(trainer, valid_data, train_args)
     if train_args.do_predict:
+        logger.info("\n----run predict")
         predict(trainer, clean_data, train_args, "clean")
         predict(trainer, other_data, train_args, "other")
 
 
 def train(trainer: Seq2SeqTrainer, args: Namespace) -> None:
-    """_train_
-        Trainer를 전달받아 Trainer.train을 실행시키는 함수입니다.
-        학습이 끝난 이후 학습 결과 그리고 최종 모델을 저장하는 기능도 합니다.
-        만약 학습을 특정 시점에 재시작 하고 싶다면 Seq2SeqTrainingArgument의
-        resume_from_checkpoint을 True혹은 PathLike한 값을 넣어주세요.
-        - huggingface.trainer.checkpoint
-        https://huggingface.co/docs/transformers/main_classes/trainer#checkpoints
-    Args:
-        trainer (Seq2SeqTrainer): Huggingface의 torch Seq2SeqTrainer를 전달받습니다.
-        args (Namespace): Seq2SeqTrainingArgument를 전달받습니다.
-    """
+    """doc"""
     # with profile(activities=[ProfilerActivity.CUDA], profile_memory=True, use_cuda=True) as prof:
     outputs = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     # prof.export_chrome_trace("trace.json")
@@ -213,12 +207,7 @@ def train(trainer: Seq2SeqTrainer, args: Namespace) -> None:
 
 
 def eval(trainer: Seq2SeqTrainer, dataset: datasets.Dataset, args: Namespace) -> None:
-    """_eval_
-        Trainer를 전달받아 Trainer.eval을 실행시키는 함수입니다.
-    Args:
-        trainer (Seq2SeqTrainer): Huggingface의 torch Seq2SeqTrainer를 전달받습니다.
-        dataset (Dataset): 검증을 하기 위한 Data를 전달받습니다.
-    """
+    """doc"""
     metrics = trainer.evaluate(dataset)
     if is_main_process(args.local_rank):
         trainer.log_metrics("valid", metrics)
@@ -226,15 +215,7 @@ def eval(trainer: Seq2SeqTrainer, dataset: datasets.Dataset, args: Namespace) ->
 
 
 def predict(trainer: Seq2SeqTrainer, dataset: datasets.Dataset, args: Namespace, prefix: Optional[str] = None) -> None:
-    """_predict_
-        Trainer를 전달받아 Trainer.predict을 실행시키는 함수입니다.
-        이때 Seq2SeqTrainer의 Predict이 실행되며 model.generator를 실행시키기 위해
-        arg값의 predict_with_generater값을 강제로 True로 변환시킵니다.
-    Args:
-        trainer (Seq2SeqTrainer): Huggingface의 torch Seq2SeqTrainer를 전달받습니다.
-        dataset (Dataset): 검증을 하기 위한 Data를 전달받습니다.
-        gen_kwargs (Dict[str, Any]): model.generator를 위한 값들을 전달받습니다.
-    """
+    """doc"""
     outputs = trainer.predict(dataset, key_prefix=prefix)
     metrics = outputs.metrics
 
@@ -242,8 +223,19 @@ def predict(trainer: Seq2SeqTrainer, dataset: datasets.Dataset, args: Namespace,
     references = metrics.label_ids
 
     if is_main_process(args.local_rank):
-        predictions
-        references
+        model_name = trainer.model.name_or_path
+        save_path = os.path.join(args.output_dir, model_name)
+
+        if not os.path.exists(save_path):
+            os.makedirs(save_path, exist_ok=True)
+
+        predictions_save_path = os.path.join(save_path, f"{prefix}_predictions.txt")
+        with open(predictions_save_path, "w", encoding="utf-8") as predictions_file:
+            predictions_file.writelines(predictions)
+
+        references_save_path = os.path.join(save_path, f"{prefix}_references.txt")
+        with open(references_save_path, "w", encoding="utf-8") as references_file:
+            references_file(references)
 
         trainer.log_metrics(prefix, metrics)
         trainer.save_metrics(prefix, metrics)

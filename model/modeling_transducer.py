@@ -2,17 +2,14 @@ import math
 import random
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Union, List
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torchaudio.transforms import FrequencyMasking, TimeMasking, RNNTLoss
 from transformers import PretrainedConfig
 from transformers.activations import ACT2FN
+from transformers.file_utils import is_torchaudio_available
 from transformers.generation_logits_process import LogitsProcessorList
 from transformers.generation_stopping_criteria import StoppingCriteriaList, validate_stopping_criteria
 from transformers.generation_utils import (
@@ -25,7 +22,17 @@ from transformers.utils import ModelOutput, logging
 
 from .config import TransformerTransducerConfig
 
+if is_torchaudio_available():
+    from torchaudio.transforms import FrequencyMasking, RNNTLoss, TimeMasking
+else:
+    raise ModuleNotFoundError(
+        "Transformer-Transducer must need torchaudio, please intall torchaudio when you use transformer-transducer"
+    )
+
 logger = logging.get_logger(__name__)
+
+
+TRANSFORMER_TRANSDUCER_MODEL_ARCHIVE_LIST = ["jp/transformer-transducer-librispeech"]
 
 
 def _make_causal_mask(input_ids_shape: torch.Size, dtype: torch.dtype, past_key_values_length: int = 0):
@@ -57,6 +64,7 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
 
+# [TODO]: it's must be changed huggingface outputs
 @dataclass
 class DecoderOutput(ModelOutput):
     last_hidden_states: torch.Tensor
@@ -72,7 +80,7 @@ class EncoderOutput(ModelOutput):
 
 
 @dataclass
-class JoinerOutput(ModelOutput):
+class TransformerTransducerJoinerOutput(ModelOutput):
     logits: torch.Tensor
     encoder_hidden_states: Optional[torch.Tensor] = None
     decoder_hidden_states: Optional[torch.Tensor] = None
@@ -82,11 +90,9 @@ class JoinerOutput(ModelOutput):
 class TransducerBaseModelOutput(ModelOutput):
     logits: torch.Tensor
 
-    encoder_last_hidden_states: Optional[torch.Tensor] = None
     encoder_hidden_states: Optional[torch.Tensor] = None
     encoder_attentions: Optional[torch.Tensor] = None
 
-    decoder_last_hidden_states: Optional[torch.Tensor] = None
     decoder_hidden_states: Optional[torch.Tensor] = None
     decoder_attentions: Optional[torch.Tensor] = None
 
@@ -100,9 +106,6 @@ class RNNTBaseOutput(ModelOutput):
     decoder_attentions: Optional[torch.Tensor] = None
     encoder_hidden_states: Optional[torch.Tensor] = None
     decoder_hidden_states: Optional[torch.Tensor] = None
-
-
-# =====================================================
 
 
 class TransformerTransducerPretrainedModel(PreTrainedModel):
@@ -333,17 +336,14 @@ class TransformerTransducerEncoderLayer(nn.Module):
             head_mask=self_head_mask,
             past_key_values=self_attn_past_key_value,
         )
-        # 이게 왜 있는거지????????????????????
-        # [TODO]: 나중에 무조건 삭제할 것!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        # hidden_states = hidden_states[0]
 
         hidden_states = self.dropout(hidden_states)
         hidden_states = attention_residual + hidden_states
         hidden_states = self.layer_norm(hidden_states)
 
-        # cross attention
-        # [TODO]: cross attention은 아직 테스트 하지 않음 나중에 테스트 할 것
-        # [XXX]: cross attention의 검증 여부에 따라 사용할 지 말지가 결정될 듯 함.
+        # [XXX]: I am not sure, Cross-Attention implementation is proper for this model.
+        #        because streaming models have many architecture
+        #        it's always removed from this code
         present_key_value = None
         cross_attn_weights = None
         if self.is_decoder and encoder_hidden_states is not None:
@@ -380,9 +380,6 @@ class TransformerTransducerEncoderLayer(nn.Module):
             outputs += (past_key_values,)
 
         return outputs
-
-
-# ======================================================
 
 
 class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
@@ -446,7 +443,8 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
         use_cache: Optional[bool] = False,
         return_dict: Optional[bool] = True,
     ) -> Union[EncoderOutput, Tuple[Any]]:
-        # Transformer-Transducer의 Encoder, Decoder는 Cross attention을 진행하지 않는다.
+        # [TODO]: change head mask name, cross, self head mask is not inappropriate name --------
+
         attentions_flag = output_attentions is not None
         output_attentions = output_attentions if attentions_flag else self.config.output_attentions
 
@@ -456,7 +454,7 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
         return_flag = return_dict is not None
         return_dict = return_dict if return_flag else self.config.use_return_dict
 
-        # [XXX]: 나중에 따로 모듈화 해야할 수도 있음
+        # [XXX]: it's may need functionalization
         seq_length = labels.shape[1]
         position_ids = self.position_ids[:, :seq_length]
         position_embed = self.position_embeddings(position_ids)
@@ -502,7 +500,7 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
                         create_custom_forward(decoder_layer),
                         hidden_states,
                         attention_mask,
-                        (head_mask[idx] if head_mask is not None else None),
+                        (self_head_mask[idx] if self_head_mask is not None else None),
                     )
                 else:
                     layer_outputs = decoder_layer(
@@ -729,8 +727,9 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
+
         if not return_dict:
-            return None
+            return tuple(v for v in [hidden_states, all_hidden_states, all_attentions] if v is not None)
 
         return EncoderOutput(
             last_hidden_states=hidden_states,
@@ -753,26 +752,23 @@ class TransformerTransducerJoiner(nn.Module):
         encoder_hiddens: torch.Tensor,
         decoder_hiddens: torch.Tensor,
         return_dict: Optional[bool] = True,
-    ) -> Union[JoinerOutput, Tuple[Any]]:
-
-        # [TODO]: 나중에 concat test하기
+    ) -> Union[TransformerTransducerJoinerOutput, Tuple[Any]]:
         if encoder_hiddens.dim() == 3 and decoder_hiddens.dim() == 3:
             encoder_hiddens = encoder_hiddens[:, :, None, :]
             decoder_hiddens = decoder_hiddens[:, None, :, :]
-            # [NOTE]: huggingface의 attention_mask 생성에서 위와 같은 방법이 사용됨
-            #         그리고 차원이 몇 차원인지 간접적으로 알려줄 수 있을 거라 생각해 사용함
 
         encoder_hiddens = self.encoder_linear(encoder_hiddens)
         decoder_hiddens = self.decoder_linear(decoder_hiddens)
 
+        # [TODO]: it need to test torch.concat instead of +
         joint_hiddens = encoder_hiddens + decoder_hiddens
         joint_hiddens = self.tanh(joint_hiddens)
         joint_hiddens = self.dense(joint_hiddens)
 
         if not return_dict:
-            return (encoder_hiddens, decoder_hiddens, joint_hiddens)
+            return (joint_hiddens, encoder_hiddens, decoder_hiddens)
 
-        return JoinerOutput(
+        return TransformerTransducerJoinerOutput(
             logits=joint_hiddens,
             encoder_hidden_states=encoder_hiddens,
             decoder_hidden_states=decoder_hiddens,
@@ -821,12 +817,8 @@ class TransformerTransducerModel(TransformerTransducerPretrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[TransducerBaseModelOutput, Tuple[Any]]:
-        """
-        Transducer는 Seq2Seq와 비슷한 모델이지만 encoder, decoder가 Cross-Attention이 아닌 Self-attention으로 작동함.
-        이후 joiner가 cross attention과 비슷한 역할을 수행함. 이는 inference에서도 동일하게 동작함.
-        """
-
         # [XXX]: 단순 indentation이 발생하는 게 싫어서 flag를 선언함. 나중에 수정해도 무관함
+        # 코드가 길면 보기가 힘들어서
         attentions_flag = output_attentions is not None
         output_attentions = output_attentions if attentions_flag else self.config.output_attentions
 
@@ -847,7 +839,7 @@ class TransformerTransducerModel(TransformerTransducerPretrainedModel):
             head_mask=head_mask,
             return_dict=return_dict,
         )
-        encoder_hiddens = encoder_outputs.last_hidden_states
+        encoder_hidden_states = encoder_outputs[0]
 
         decoder_outputs = self.decoder(
             labels=labels,
@@ -857,26 +849,26 @@ class TransformerTransducerModel(TransformerTransducerPretrainedModel):
             self_head_mask=decoder_head_mask,
             return_dict=return_dict,
         )
-        decoder_hiddens = decoder_outputs.last_hidden_states
+        decoder_hidden_states = decoder_outputs[0]
 
-        joiner_outputs = self.joiner(encoder_hiddens, decoder_hiddens, return_dict)
+        joiner_outputs = self.joiner(encoder_hidden_states, decoder_hidden_states, return_dict)
         hidden_states = joiner_outputs.logits
 
         if not return_dict:
             return (
-                (hidden_states, encoder_hiddens, decoder_hiddens)
+                (hidden_states, encoder_outputs[0], decoder_outputs[0])
                 + encoder_outputs[1:]
                 + decoder_outputs[1:]
                 + joiner_outputs[1:]
             )
+        # [XXX]: i don't know how make model_outputs,
+        #        it's need to add encoder & decoder's last_hidden_states?
         return TransducerBaseModelOutput(
             logits=hidden_states,
-            encoder_last_hidden_states=encoder_hiddens,
-            encoder_hidden_states=None,
-            encoder_attentions=None,
-            decoder_attentions=None,
-            decoder_last_hidden_states=decoder_hiddens,
-            decoder_hidden_states=None,
+            encoder_hidden_states=encoder_outputs[2],
+            decoder_hidden_states=decoder_outputs[2],
+            encoder_attentions=encoder_outputs[1],
+            decoder_attentions=decoder_outputs[1],
         )
 
 
@@ -916,10 +908,7 @@ class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
         label_lengths: Optional[torch.Tensor] = None,
         feature_lengths: Optional[torch.Tensor] = None,
     ) -> Union[RNNTBaseOutput, Tuple[Any]]:
-        # [BUG]: DP에서는 동작할 수 없음. 아마 attention_mask단위로 계산하는 것 때문에 발생하는 문제인 듯 함.
-        #        max_length문제는 나중에 해결할 것
-
-        # [NOTE]: attention_mask가 3차원으로 들어와도 정상적으로 작동하도록 고려함
+        # [BUG]: !!!!!!!!! it's didn't work at DP !!!!!!!!!!!
         if attention_mask is not None:
             if attention_mask.dim() == 3 and feature_lengths is None:
                 # [TODO]: 나중에 영어로 수정할 것
@@ -942,10 +931,8 @@ class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
         logits = transducer_outputs.logits
         log_prob = self.log_softmax(logits)
 
-        # [NOTE]: label에 붙어져 있는 blank token 제거
         non_blank_labels = labels[:, 1:].to(torch.int32)
-        # [XXX]: torchaudio의 rnn-t loss는 int32의 정수형만 받아들임
-        #        이 if문은 부분은 나중에 수정될 수 있음
+
         feature_lengths = feature_lengths if feature_lengths else attention_mask.sum(-1, dtype=torch.int32)
         label_lengths = label_lengths if label_lengths else decoder_attention_mask.sum(-1, dtype=torch.int32)
         label_lengths = label_lengths - 1
@@ -957,15 +944,15 @@ class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
             logit_lengths=feature_lengths,
         )
 
-        # [TODO]: beamsearch 테스트를 위해 넣어둔 코드, 나중에 삭제할 것!
-        # self.test_beam_search(transducer_outputs.audio_last_hidden_state[0])
-        # [NOTE]: transformer-transducer는 메모리를 많이 차지하기 때문에 임시로 empty_cache를 진행함
-        #         torch profiler를 이용해 값을 확인할 것
+        # [NOTE]: my testing environment is rtx1080 * 4, rtx1080's GPU memory is 12GB.
+        #         RNN-T models have many space complexity(it's need large capacity)
+        #         so i use cuda.empty_cache()
         torch.cuda.empty_cache()
 
         if not return_dict:
             return None
 
+        # [TODO]: it's need to add more outputs, like encoder & decoder hidden_states, attentions, last_hidden_states
         return RNNTBaseOutput(loss=loss, logits=logits)
 
     def prepare_inputs_for_generation(

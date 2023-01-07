@@ -18,14 +18,9 @@ def get_tri_stage_scheduler_with_warmup(
     """doc"""
     default_lr = optimizer.defaults["lr"]
 
-    check_warmup_type = isinstance(num_warmup_steps, int)
-    warmup_steps = num_warmup_steps if check_warmup_type else num_warmup_steps * num_training_steps
-
-    check_hold_type = isinstance(num_hold_steps, int)
-    hold_steps = num_hold_steps if check_hold_type else num_hold_steps * num_training_steps
-
-    check_decay_type = isinstance(num_decay_steps, int)
-    decay_steps = num_decay_steps if check_decay_type else num_decay_steps * num_training_steps
+    warmup_steps = num_warmup_steps if num_warmup_steps > 0 else (num_warmup_steps * num_training_steps)
+    hold_steps = num_hold_steps if num_hold_steps > 0 else (num_hold_steps * num_training_steps)
+    decay_steps = num_decay_steps if num_hold_steps > 0 else (num_decay_steps * num_training_steps)
 
     if not (warmup_steps + hold_steps + decay_steps) <= num_training_steps:
         raise ValueError(
@@ -39,20 +34,20 @@ def get_tri_stage_scheduler_with_warmup(
     def _decide_stage(step: int) -> Tuple[int, int]:
         # [NOTE]: warmup(rampup) stage
         if step < warmup_steps:
-            return ("warm", step)
+            return "warm", step
         offset = warmup_steps
 
         # [NOTE]: hold stage
-        if step < offset + hold_steps:
-            return ("hold", step - offset)
+        if step < (offset + hold_steps):
+            return "hold", (step - offset)
         offset += hold_steps
 
         # [NOTE]: decay stage
-        if step <= offset + decay_steps:
-            return ("decay", step - offset)
+        if step <= (offset + decay_steps):
+            return "decay", (step - offset)
 
         # [NOTE]: over stage
-        return "over", step - offset
+        return "over", (step - offset)
 
     def lr_lambda(current_step: int) -> float:
         stage, step = _decide_stage(current_step)
@@ -67,8 +62,6 @@ def get_tri_stage_scheduler_with_warmup(
             learning_rate = (default_lr**compensator) * math.exp(-decay_factor * step)
         elif "over" == stage:
             learning_rate = final_lr
-        else:
-            raise NotImplementedError()
 
         return learning_rate
 

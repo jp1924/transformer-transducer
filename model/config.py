@@ -29,14 +29,8 @@ class TransformerTransducerConfig(PretrainedConfig):
         time_mask_size=30,
         freq_apply_num=2,
         time_apply_num=10,
-        bos_token_id=0,
         blk_token_id=0,
-        eos_token_id=2,
-        pad_token_id=1,
         generate_repeat_max=10,
-        output_attentions=False,
-        output_hidden_states=False,
-        is_encoder_decoder=True,
         **kwargs
     ) -> None:
         super().__init__(**kwargs)
@@ -59,22 +53,14 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.hidden_dropout = hidden_dropout
 
         self.max_position_embeddings = max_position_embeddings
-        self.vocab_size = vocab_size
-
         self.position_embedding_type = position_embedding_type
+        self.vocab_size = vocab_size
 
         self.loss_reduction = loss_reduction
         self.clamp = clamp
         self.initializer_range = initializer_range
 
         self.blk_token_id = blk_token_id
-        self.bos_token_id = bos_token_id
-        self.eos_token_id = eos_token_id
-        self.pad_token_id = pad_token_id
-
-        self.output_attentions = output_attentions
-        self.output_hidden_states = output_hidden_states
-        self.is_encoder_decoder = is_encoder_decoder
 
         # spec-augment
         self.freq_mask_size = freq_mask_size
@@ -83,39 +69,6 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.time_apply_num = time_apply_num
 
         # for generate
-        self.generate_repeat_max = generate_repeat_max
-
-        self.pruned_heads = {}
-        self.num_return_sequences = 1
-        self.early_stopping = True
-        self.length_penalty = 1.0
-
-        self.max_length = 512
-        self.min_length = 1
-        self.do_sample = False
-        self.early_stopping = False
-        self.num_beams = 1
-        self.num_beam_groups = 1
-        self.diversity_penalty = 0.0
-        self.temperature = 1.0
-        self.top_k = 50
-        self.top_p = 1.0
-        self.typical_p = 1.0
-        self.repetition_penalty = 1.0
-        self.length_penalty = 1.0
-        self.no_repeat_ngram_size = 0
-        self.encoder_no_repeat_ngram_size = 0
-        self.bad_words_ids = None
-        self.num_return_sequences = 1
-        self.chunk_size_feed_forward = 0
-        self.output_scores = False
-        self.return_dict_in_generate = False
-        self.forced_bos_token_id = None
-        self.forced_eos_token_id = None
-        self.remove_invalid_values = False
-        self.exponential_decay_length_penalty = None
-        self.suppress_tokens = None
-        self.begin_suppress_tokens = None
-
-        self.decoder_start_token_id = decoder_start_token_id
         self.attention_type = attention_type
+        self.decoder_start_token_id = decoder_start_token_id
+        self.generate_repeat_max = generate_repeat_max

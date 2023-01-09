@@ -223,7 +223,7 @@ def predict(
     save: bool = False,
 ) -> None:
     """doc"""
-    outputs = trainer.predict(dataset, key_prefix=prefix)
+    outputs = trainer.predict(dataset, metric_key_prefix=prefix)
     metrics = outputs.metrics
     logger.info(f"{prefix}: {metrics}")
 

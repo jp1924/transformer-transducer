@@ -5,17 +5,18 @@ from .tokenizer import TransformerTransducerTokenizer
 from contextlib import contextmanager
 
 
+# [NOTE]: copied from Wav2Vec2Processor
 class TransformerTransducerProcessor(ProcessorMixin):
     r"""
-    Constructs a Wav2Vec2 processor which wraps a Wav2Vec2 feature extractor and a Wav2Vec2 CTC tokenizer into a single
+    Constructs a TransformerTransducer processor which wraps a TransformerTransducer feature extractor and a TransformerTransducerTokenizer into a single
     processor.
 
-    [`Wav2Vec2Processor`] offers all the functionalities of [`Wav2Vec2FeatureExtractor`] and [`PreTrainedTokenizer`].
-    See the docstring of [`~Wav2Vec2Processor.__call__`] and [`~Wav2Vec2Processor.decode`] for more information.
+    [`TransformerTransducerProcessor`] offers all the functionalities of [`TransformerTransducerFeatureExtractor`] and [`PreTrainedTokenizer`].
+    See the docstring of [`~TransformerTransducerProcessor.__call__`] and [`~TransformerTransducerProcessor.decode`] for more information.
 
     Args:
-        feature_extractor (`Wav2Vec2FeatureExtractor`):
-            An instance of [`Wav2Vec2FeatureExtractor`]. The feature extractor is a required input.
+        feature_extractor (`TransformerTransducerFeatureExtractor`):
+            An instance of [`TransformerTransducerFeatureExtractor`]. The feature extractor is a required input.
         tokenizer ([`PreTrainedTokenizer`]):
             An instance of [`PreTrainedTokenizer`]. The tokenizer is a required input.
     """
@@ -34,7 +35,7 @@ class TransformerTransducerProcessor(ProcessorMixin):
             warnings.warn(
                 f"Loading a tokenizer inside {cls.__name__} from a config that does not"
                 " include a `tokenizer_class` attribute is deprecated and will be "
-                "removed in v5. Please add `'tokenizer_class': 'Wav2Vec2CTCTokenizer'`"
+                "removed in v5. Please add `'tokenizer_class': 'TransformerTransducerTokenizer'`"
                 " attribute to either your `config.json` or `tokenizer_config.json` "
                 "file to suppress this warning: ",
                 FutureWarning,
@@ -53,18 +54,18 @@ class TransformerTransducerProcessor(ProcessorMixin):
 
     def __call__(self, *args, **kwargs):
         """
-        When used in normal mode, this method forwards all its arguments to Wav2Vec2FeatureExtractor's
-        [`~Wav2Vec2FeatureExtractor.__call__`] and returns its output. If used in the context
-        [`~Wav2Vec2Processor.as_target_processor`] this method forwards all its arguments to PreTrainedTokenizer's
+        When used in normal mode, this method forwards all its arguments to TransformerTransducerFeatureExtractor's
+        [`~TransformerTransducerFeatureExtractor.__call__`] and returns its output. If used in the context
+        [`~TransformerTransducerProcessor.as_target_processor`] this method forwards all its arguments to PreTrainedTokenizer's
         [`~PreTrainedTokenizer.__call__`]. Please refer to the docstring of the above two methods for more information.
         """
         return self.current_processor(*args, **kwargs)
 
     def pad(self, *args, **kwargs):
         """
-        When used in normal mode, this method forwards all its arguments to Wav2Vec2FeatureExtractor's
-        [`~Wav2Vec2FeatureExtractor.pad`] and returns its output. If used in the context
-        [`~Wav2Vec2Processor.as_target_processor`] this method forwards all its arguments to PreTrainedTokenizer's
+        When used in normal mode, this method forwards all its arguments to TransformerTransducerFeatureExtractor's
+        [`~TransformerTransducerFeatureExtractor.pad`] and returns its output. If used in the context
+        [`~TransformerTransducerProcessor.as_target_processor`] this method forwards all its arguments to PreTrainedTokenizer's
         [`~PreTrainedTokenizer.pad`]. Please refer to the docstring of the above two methods for more information.
         """
         return self.current_processor.pad(*args, **kwargs)
@@ -95,7 +96,7 @@ class TransformerTransducerProcessor(ProcessorMixin):
     def as_target_processor(self):
         """
         Temporarily sets the tokenizer for processing the input. Useful for encoding the labels when fine-tuning
-        Wav2Vec2.
+        TransformerTransducer.
         """
         self.current_processor = self.tokenizer
         yield

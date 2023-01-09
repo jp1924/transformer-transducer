@@ -1,5 +1,10 @@
 from transformers import PretrainedConfig
 
+# [NOTE]: No environment to train the model now, temporarily put wav2vec2
+TRANSFORMER_TRANSDUCER_PRETRAINED_CONFIG_ARCHIVE_MAP = {
+    "jp42maru/transformer-transducer-960h": "https://huggingface.co/jp42maru/transformer-transducer-960h/tree/main/config.json",
+}
+
 
 class TransformerTransducerConfig(PretrainedConfig):
     def __init__(

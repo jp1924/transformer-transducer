@@ -99,7 +99,9 @@ WAV2VEC2_KWARGS_DOCSTRING = r"""
                 Whether or not to print more information and warnings.
 """
 
+
 # [NOTE]: Transformer-Transducer tokenizer is grpaheme tokenizer
+#         and it's must be
 # [NOTE]: copied from Wav2Vec2Tokenizer
 class TransformerTransducerTokenizer(PreTrainedTokenizer):
     """
@@ -222,118 +224,9 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
         result = self.decoder.get(index, self.unk_token)
         return result
 
-    def convert_tokens_to_string(
-        self,
-        tokens: List[str],
-        group_tokens: bool = True,
-        spaces_between_special_tokens: bool = False,
-        output_char_offsets: bool = False,
-        output_word_offsets: bool = False,
-    ) -> Dict[str, Union[str, float]]:
-        """
-        Converts a connectionist-temporal-classification (CTC) output tokens into a single string.
-        """
-        if len(tokens) == 0:
-            return {"text": "", "char_offsets": [], "word_offsets": []}
-        # group same tokens into non-repeating tokens in CTC style decoding
-        if group_tokens:
-            chars, char_repetitions = zip(*((token, len(list(group_iter))) for token, group_iter in groupby(tokens)))
-        else:
-            chars = tokens
-            char_repetitions = len(tokens) * [1]
+    # def convert_tokens_to_string(
 
-        # filter self.pad_token which is used as CTC-blank token
-        processed_chars = list(filter(lambda char: char != self.pad_token, chars))
-
-        # replace delimiter token
-        processed_chars = [
-            self.replace_word_delimiter_char if char == self.word_delimiter_token else char for char in processed_chars
-        ]
-
-        # retrieve offsets
-        char_offsets = word_offsets = None
-        if output_char_offsets or output_word_offsets:
-            char_offsets = self._compute_offsets(char_repetitions, chars, self.pad_token)
-
-            if len(char_offsets) != len(processed_chars):
-                raise ValueError(
-                    f"`char_offsets`: {char_offsets} and `processed_tokens`: {processed_chars}"
-                    " have to be of the same length, but are: "
-                    f"`len(offsets)`: {len(char_offsets)} and `len(processed_tokens)`:"
-                    f" {len(processed_chars)}"
-                )
-
-            # set tokens to correct processed token
-            for i, char in enumerate(processed_chars):
-                char_offsets[i]["char"] = char
-
-            # retrieve word offsets from character offsets
-            word_offsets = None
-            if output_word_offsets:
-                word_offsets = self._get_word_offsets(char_offsets, self.replace_word_delimiter_char)
-
-            # don't output chars if not set to True
-            if not output_char_offsets:
-                char_offsets = None
-
-        # join to string
-        join_char = " " if spaces_between_special_tokens else ""
-        string = join_char.join(processed_chars).strip()
-
-        if self.do_lower_case:
-            string = string.lower()
-
-        return {"text": string, "char_offsets": char_offsets, "word_offsets": word_offsets}
-
-    @staticmethod
-    def _compute_offsets(
-        char_repetitions: List[int], chars: List[str], ctc_token: int
-    ) -> List[Dict[str, Union[str, int]]]:
-        end_indices = np.asarray(char_repetitions).cumsum()
-        start_indices = np.concatenate(([0], end_indices[:-1]))
-
-        offsets = [
-            {"char": t, "start_offset": s, "end_offset": e} for t, s, e in zip(chars, start_indices, end_indices)
-        ]
-
-        # filter out CTC token
-        offsets = list(filter(lambda offsets: offsets["char"] != ctc_token, offsets))
-        return offsets
-
-    @staticmethod
-    def _get_word_offsets(
-        offsets: Dict[str, Union[str, float]], word_delimiter_char: str = " "
-    ) -> Dict[str, Union[str, float]]:
-        word_offsets = []
-
-        last_state = "SPACE"
-        word = ""
-        start_offset = 0
-        end_offset = 0
-        for i, offset in enumerate(offsets):
-            char = offset["char"]
-            state = "SPACE" if char == word_delimiter_char else "WORD"
-
-            if state == last_state:
-                # If we are in the same state as before, we simply repeat what we've done before
-                end_offset = offset["end_offset"]
-                word += char
-            else:
-                # Switching state
-                if state == "SPACE":
-                    # Finishing a word
-                    word_offsets.append({"word": word, "start_offset": start_offset, "end_offset": end_offset})
-                else:
-                    # Starting a new word
-                    start_offset = offset["start_offset"]
-                    end_offset = offset["end_offset"]
-                    word = char
-
-            last_state = state
-        if last_state == "WORD":
-            word_offsets.append({"word": word, "start_offset": start_offset, "end_offset": end_offset})
-
-        return word_offsets
+    # def _get_word_offsets(
 
     def prepare_for_tokenization(self, text, is_split_into_words=False, **kwargs):
         if is_split_into_words:
@@ -344,11 +237,6 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
         self,
         token_ids: List[int],
         skip_special_tokens: bool = False,
-        clean_up_tokenization_spaces: bool = True,
-        group_tokens: bool = True,
-        spaces_between_special_tokens: bool = False,
-        output_word_offsets: Optional[bool] = False,
-        output_char_offsets: Optional[bool] = False,
     ) -> str:
         """
         special _decode function is needed for Wav2Vec2Tokenizer because added tokens should be treated exactly the
@@ -367,10 +255,6 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
         self,
         sequences: Union[List[int], List[List[int]], "np.ndarray", "torch.Tensor", "tf.Tensor"],
         skip_special_tokens: bool = False,
-        clean_up_tokenization_spaces: bool = True,
-        output_char_offsets: bool = False,
-        output_word_offsets: bool = False,
-        **kwargs,
     ) -> List[str]:
         """
         Convert a list of lists of token ids into a list of strings by calling decode.
@@ -418,16 +302,9 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
             self.decode(
                 seq,
                 skip_special_tokens=skip_special_tokens,
-                clean_up_tokenization_spaces=clean_up_tokenization_spaces,
-                output_char_offsets=output_char_offsets,
-                output_word_offsets=output_word_offsets,
-                **kwargs,
             )
             for seq in sequences
         ]
-        if output_char_offsets or output_word_offsets:
-            # transform list of dicts to dict of lists
-            return TransformerTransducerTokenizerOutput({k: [d[k] for d in batch_decoded] for k in batch_decoded[0]})
 
         return batch_decoded
 
@@ -437,10 +314,6 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
         self,
         token_ids: Union[int, List[int], "np.ndarray", "torch.Tensor", "tf.Tensor"],
         skip_special_tokens: bool = False,
-        clean_up_tokenization_spaces: bool = True,
-        output_char_offsets: bool = False,
-        output_word_offsets: bool = False,
-        **kwargs,
     ) -> str:
         """
         Converts a sequence of ids in a string, using the tokenizer and vocabulary with options to remove special
@@ -534,10 +407,6 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
         return self._decode(
             token_ids=token_ids,
             skip_special_tokens=skip_special_tokens,
-            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
-            output_char_offsets=output_char_offsets,
-            output_word_offsets=output_word_offsets,
-            **kwargs,
         )
 
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:

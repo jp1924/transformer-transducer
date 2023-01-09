@@ -19,7 +19,7 @@ from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
 from utils import DataArguments, ModelArguments, TransducerTrainArgument, get_tri_stage_scheduler_with_warmup
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("transformers")
 
 
 def main(parser: HfArgumentParser) -> None:
@@ -121,8 +121,8 @@ def main(parser: HfArgumentParser) -> None:
 
     logger.info("\n---- data preprocessing ----")
     train_data = data_preprocessing("train") if train_args.do_train else None
-    # [XXX: !!it's concated clean & other valid data!!
-    valid_data = data_preprocessing("valid") if train_args.do_eval else None
+    del_data = asr_data.pop("validation.other")
+    valid_data = data_preprocessing("validation.clean") if train_args.do_eval else None
     clean_data = data_preprocessing("clean") if train_args.do_predict else None
     other_data = data_preprocessing("other") if train_args.do_predict else None
 

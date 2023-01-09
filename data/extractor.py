@@ -84,7 +84,7 @@ def mel_to_hz(mels: np.ndarray, mel_scale: str = "htk") -> np.ndarray:
 
 
 # [NOTE]: At first, it was modeled after Whisper's extractor,
-#         but later, it included the emulator's extractor, which made both torchaudio and numpy possible
+#         but later, it included the emformer's extractor, which made both torchaudio and numpy possible
 
 # [NOTE]: copied from whisper extractor
 #         It can be driven by pytorch or numpy.

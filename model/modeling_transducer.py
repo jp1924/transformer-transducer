@@ -64,7 +64,7 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
 
-# [TODO]: it's must be changed huggingface outputs
+# [TODO]: it's must be changed huggingface outputs style
 @dataclass
 class DecoderOutput(ModelOutput):
     last_hidden_states: torch.Tensor
@@ -72,6 +72,7 @@ class DecoderOutput(ModelOutput):
     decoder_hidden_states: Optional[torch.Tensor] = None
 
 
+# [TODO]: it's must be changed huggingface outputs style
 @dataclass
 class EncoderOutput(ModelOutput):
     last_hidden_states: torch.Tensor
@@ -587,7 +588,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
                 chunk_size=3,
             )
         elif self.attention_type == "diagonal":
-            extended_attention_mask = self._create_diag_attention_mask(
+            extended_attention_mask = self._create_diagonal_attention_mask(
                 attention_mask,
                 input_shape,
                 left_context=10,
@@ -636,7 +637,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
         chunk_attention_mask = torch.stack([chunk_mask for _ in range(batch_size)])
         return chunk_attention_mask
 
-    def _create_diag_attention_mask(
+    def _create_diagonal_attention_mask(
         self,
         attention_mask: torch.Tensor,
         input_shape: Tuple[int],
@@ -673,7 +674,7 @@ class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
         return_flag = return_dict is not None
         return_dict = return_dict if return_flag else self.config.use_return_dict
 
-        # [TODO]: attention_mask에 dtype 설정되도록 하기
+        # [TODO]: it need clean up
         feature_shape = input_features.size()
         attention_mask = self._prepare_encoder_attention_mask(attention_mask, feature_shape)
 
@@ -817,8 +818,7 @@ class TransformerTransducerModel(TransformerTransducerPretrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[TransducerBaseModelOutput, Tuple[Any]]:
-        # [XXX]: 단순 indentation이 발생하는 게 싫어서 flag를 선언함. 나중에 수정해도 무관함
-        # 코드가 길면 보기가 힘들어서
+        # [XXX]: To make code easier to see, use the following method. Can be modified at any time.
         attentions_flag = output_attentions is not None
         output_attentions = output_attentions if attentions_flag else self.config.output_attentions
 
@@ -865,10 +865,10 @@ class TransformerTransducerModel(TransformerTransducerPretrainedModel):
         #        it's need to add encoder & decoder's last_hidden_states?
         return TransducerBaseModelOutput(
             logits=hidden_states,
-            encoder_hidden_states=encoder_outputs[2],
-            decoder_hidden_states=decoder_outputs[2],
-            encoder_attentions=encoder_outputs[1],
-            decoder_attentions=decoder_outputs[1],
+            encoder_hidden_states=encoder_outputs.encoder_hidden_states,
+            decoder_hidden_states=decoder_outputs.decoder_hidden_states,
+            encoder_attentions=encoder_outputs.encoder_attentions,
+            decoder_attentions=decoder_outputs.decoder_attentions,
         )
 
 
@@ -909,6 +909,7 @@ class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
         feature_lengths: Optional[torch.Tensor] = None,
     ) -> Union[RNNTBaseOutput, Tuple[Any]]:
         # [BUG]: !!!!!!!!! it's didn't work at DP !!!!!!!!!!!
+
         if attention_mask is not None:
             if attention_mask.dim() == 3 and feature_lengths is None:
                 # [TODO]: 나중에 영어로 수정할 것
@@ -931,11 +932,12 @@ class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
         logits = transducer_outputs.logits
         log_prob = self.log_softmax(logits)
 
+        # [TODO]: maybe it need functionalization
         non_blank_labels = labels[:, 1:].to(torch.int32)
 
         feature_lengths = feature_lengths if feature_lengths else attention_mask.sum(-1, dtype=torch.int32)
         label_lengths = label_lengths if label_lengths else decoder_attention_mask.sum(-1, dtype=torch.int32)
-        label_lengths = label_lengths - 1
+        label_lengths = label_lengths - 1  # remove blank length
 
         loss = self.rnnt_loss(
             logits=log_prob,
@@ -946,7 +948,7 @@ class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
 
         # [NOTE]: my testing environment is rtx1080 * 4, rtx1080's GPU memory is 12GB.
         #         RNN-T models have many space complexity(it's need large capacity)
-        #         so i use cuda.empty_cache()
+        #         so i use cuda.empty_cache() for testing
         torch.cuda.empty_cache()
 
         if not return_dict:
@@ -984,9 +986,6 @@ class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
         synced_gpus: Optional[bool] = False,
         **model_kwargs,
     ) -> Union[GreedySearchOutput, torch.LongTensor]:
-
-        # [TODO]: input_features라는 이름은 나중에 바꿀 것
-
         # [NOTE]: logits_processor
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
         stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
@@ -1066,8 +1065,7 @@ class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
                 next_token = torch.argmax(next_tokens_scores)
                 next_token_score = next_tokens_scores[next_token]
 
-                repeat_check = repeat_count == self.config.generate_repeat_max
-                if next_token == self.config.blk_token_id or repeat_check:
+                if next_token == self.config.blk_token_id or repeat_count == self.config.generate_repeat_max:
                     time_idx += 1
                     repeat_count = 0
                     continue

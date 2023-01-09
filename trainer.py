@@ -53,14 +53,14 @@ class TransducerTrainer(Seq2SeqTrainer):
         with self.compute_loss_context_manager():
             loss = self.compute_loss(model, inputs)
 
-        # # [NOTE]: gaussian noise
-        # step = self.state.global_step
-        # if (step > 10000 and self.model.training) and False:
-        #     # [NOTE]: copied from https://discuss.pytorch.org/t/is-there-any-way-to-add-noise-to-trained-weights/29829/2
-        #     with torch.no_grad():
-        #         for param, name in zip(model.parameters(), model.named_parameters()):
-        #             if "weight" in name:
-        #                 param.add_(noise(param))
+        # [NOTE]: gaussian noise
+        step = self.state.global_step
+        if (step > 10000 and self.model.training) and (self.args.gradient_accumulation_steps % step == 0):
+            # [NOTE]: copied from https://discuss.pytorch.org/t/is-there-any-way-to-add-noise-to-trained-weights/29829/2
+            with torch.no_grad():
+                for param, name in zip(model.parameters(), model.named_parameters()):
+                    if "weight" in name:
+                        param.add_(noise(param))
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -68,30 +68,16 @@ class TransducerTrainer(Seq2SeqTrainer):
         if self.args.gradient_accumulation_steps > 1 and not self.deepspeed:
             # deepspeed handles loss scaling by gradient_accumulation_steps in its `backward`
             loss = loss / self.args.gradient_accumulation_steps
-        try:
-            if self.do_grad_scaling:
-                self.scaler.scale(loss).backward()
-            elif self.use_apex:
-                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                    scaled_loss.backward()
-            elif self.deepspeed:
-                # loss gets scaled under gradient_accumulation_steps in deepspeed
-                loss = self.deepspeed.backward(loss)
-            else:
-                loss.backward()
-        except:
-            """
-            [BUG]
-            RuntimeError: Expected to have finished reduction in the prior iteration before starting a new one.
-            This error indicates that your module has parameters that were not used in producing loss. Since `find_unused_parameters=True` is enabled,
-            this likely  means that not all `forward` outputs participate in computing loss. You can fix this by making sure all `forward` function outputs participate in calculating loss.
-            If you already have done the above, then the distributed data parallel module wasn't able to locate the output tensors in the return value of your module's `forward` function.
-            Please include the loss function and the structure of the return value of `forward` of your module when reporting this issue (e.g. list, dict, iterable).
-            Parameters which did not receive grad for rank 3:
-            """
-            print(inputs["input_features"].cpu().detach().tolist())
-            print("\n\n" + ("=" * 100) + "\n\n")
-            print(inputs["labels"].cpu().detach().tolist())
-            exit()
+
+        if self.do_grad_scaling:
+            self.scaler.scale(loss).backward()
+        elif self.use_apex:
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+        elif self.deepspeed:
+            # loss gets scaled under gradient_accumulation_steps in deepspeed
+            loss = self.deepspeed.backward(loss)
+        else:
+            loss.backward()
 
         return loss.detach()

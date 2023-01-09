@@ -33,7 +33,7 @@ ListOfDict = List[Dict[str, Union[int, str]]]
 
 
 @dataclass
-class Wav2Vec2CTCTokenizerOutput(ModelOutput):
+class TransformerTransducerTokenizerOutput(ModelOutput):
     """
     Output type of [` Wav2Vec2CTCTokenizer`], with transcription.
 
@@ -61,17 +61,17 @@ VOCAB_FILES_NAMES = {
 
 PRETRAINED_VOCAB_FILES_MAP = {
     "vocab_file": {
-        "facebook/wav2vec2-base-960h": "https://huggingface.co/facebook/wav2vec2-base-960h/resolve/main/vocab.json",
+        "jp42maru/transformer-transducer-960h": "https://huggingface.co/jp42maru/transformer-transducer-960h/tree/main/vocab.json",
     },
     "tokenizer_config_file": {
-        "facebook/wav2vec2-base-960h": (
-            "https://huggingface.co/facebook/wav2vec2-base-960h/resolve/main/tokenizer_config.json"
+        "jp42maru/transformer-transducer-960h": (
+            "https://huggingface.co/jp42maru/transformer-transducer-960h/tree/main/tokenizer_config.json"
         ),
     },
 }
 
 # Wav2Vec2 has no max input length
-PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {"facebook/wav2vec2-base-960h": sys.maxsize}
+PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {"jp42maru/transformer-transducer-960h": sys.maxsize}
 
 WAV2VEC2_KWARGS_DOCSTRING = r"""
             padding (`bool`, `str` or [`~utils.PaddingStrategy`], *optional*, defaults to `False`):
@@ -99,11 +99,7 @@ WAV2VEC2_KWARGS_DOCSTRING = r"""
                 Whether or not to print more information and warnings.
 """
 
-# [NOTE]: RNN-T, like CTC, predicts speech as grapheme. so Sentence Piece Tokenizer should not be used.
-#         But I'm not sure if this is the right Tokenizer for RNN-T.
-#         It may be modified later!
-
-
+# [NOTE]: Transformer-Transducer tokenizer is grpaheme tokenizer
 # [NOTE]: copied from Wav2Vec2Tokenizer
 class TransformerTransducerTokenizer(PreTrainedTokenizer):
     """
@@ -414,8 +410,8 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
                 Will be passed to the underlying model specific decode method.
 
         Returns:
-            `List[str]` or [`~models.wav2vec2.tokenization_wav2vec2.Wav2Vec2CTCTokenizerOutput`]: The list of decoded
-            sentences. Will be a [`~models.wav2vec2.tokenization_wav2vec2.Wav2Vec2CTCTokenizerOutput`] when
+            `List[str]` or [`~models.wav2vec2.tokenization_wav2vec2.TransformerTransducerTokenizerOutput`]: The list of decoded
+            sentences. Will be a [`~models.wav2vec2.tokenization_wav2vec2.TransformerTransducerTokenizerOutput`] when
             `output_char_offsets == True` or `output_word_offsets == True`.
         """
         batch_decoded = [
@@ -431,7 +427,7 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
         ]
         if output_char_offsets or output_word_offsets:
             # transform list of dicts to dict of lists
-            return Wav2Vec2CTCTokenizerOutput({k: [d[k] for d in batch_decoded] for k in batch_decoded[0]})
+            return TransformerTransducerTokenizerOutput({k: [d[k] for d in batch_decoded] for k in batch_decoded[0]})
 
         return batch_decoded
 
@@ -485,8 +481,8 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
                 Will be passed to the underlying model specific decode method.
 
         Returns:
-            `str` or [`~models.wav2vec2.tokenization_wav2vec2.Wav2Vec2CTCTokenizerOutput`]: The list of decoded
-            sentences. Will be a [`~models.wav2vec2.tokenization_wav2vec2.Wav2Vec2CTCTokenizerOutput`] when
+            `str` or [`~models.wav2vec2.tokenization_wav2vec2.TransformerTransducerTokenizerOutput`]: The list of decoded
+            sentences. Will be a [`~models.wav2vec2.tokenization_wav2vec2.TransformerTransducerTokenizerOutput`] when
             `output_char_offsets == True` or `output_word_offsets == True`.
 
         Example:

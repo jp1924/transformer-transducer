@@ -32,7 +32,7 @@ else:
 logger = logging.get_logger(__name__)
 
 
-TRANSFORMER_TRANSDUCER_MODEL_ARCHIVE_LIST = ["jp/transformer-transducer-librispeech"]
+TRANSFORMER_TRANSDUCER_MODEL_ARCHIVE_LIST = ["jp42maru/transformer-transducer-960h"]
 
 
 def _make_causal_mask(input_ids_shape: torch.Size, dtype: torch.dtype, past_key_values_length: int = 0):

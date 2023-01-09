@@ -2,7 +2,7 @@ import io
 import logging
 import os
 from argparse import Namespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import datasets
 import numpy as np
@@ -29,9 +29,7 @@ def main(parser: HfArgumentParser) -> None:
 
     def metrics(evaluation_result: EvalPrediction) -> Dict[str, float]:
         """doc"""
-
         result = dict()
-
         predicts = evaluation_result.predictions
         predicts = np.where(predicts != -100, predicts, tokenizer.pad_token_id)
         predictions = tokenizer.batch_decode(predicts, skip_special_tokens=True)
@@ -42,7 +40,6 @@ def main(parser: HfArgumentParser) -> None:
 
         wer_score = wer._compute(predictions, references)
         cer_score = cer._compute(predictions, references)
-
         result = {
             "wer": wer_score,
             "cer": cer_score,
@@ -99,7 +96,7 @@ def main(parser: HfArgumentParser) -> None:
     load_name = train_args.resume_from_checkpoint or model_args.model_name_or_path
     tokenizer_name = train_args.vocab_path or load_name
 
-    logger.info("\n----set tokenizer & extractor")
+    logger.info("\n---- set tokenizer & extractor ----")
     tokenizer = TransformerTransducerTokenizer.from_pretrained(tokenizer_name, cache_dir=model_args.cache_dir)
     extractor = TransformerTransducerFeatureExtractor(
         n_fft=data_args.num_fourier,
@@ -108,32 +105,32 @@ def main(parser: HfArgumentParser) -> None:
         stack=data_args.mel_stack,
         stride=data_args.window_stride,
     )
-    # [NOTE]: process does not worked, it not added transformers init
+    # [NOTE]: process does not worked, it's not added transformers init
     # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
 
-    logger.info("\n----set model & config")
+    logger.info("\n---- set model & config ----")
     if load_name:
         config = TransformerTransducerConfig.from_pretrained(load_name, cache_dir=model_args.cache_dir)
         model = TransformerTransducerForRNNT.from_pretrained(load_name, cache_dir=model_args.cache_dir, config=config)
     else:
-        config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size)
+        config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size, is_encoder_decoder=True)
         model = TransformerTransducerForRNNT(config)
 
-    logger.info("\n----load data")
+    logger.info("\n---- load data ----")
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
 
-    logger.info("\n----data preprocessing")
+    logger.info("\n---- data preprocessing ----")
     train_data = data_preprocessing("train") if train_args.do_train else None
     # [XXX: !!it's concated clean & other valid data!!
     valid_data = data_preprocessing("valid") if train_args.do_eval else None
     clean_data = data_preprocessing("clean") if train_args.do_predict else None
     other_data = data_preprocessing("other") if train_args.do_predict else None
 
-    logger.info("\n----load metrics")
+    logger.info("\n---- load metrics ----")
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
     cer = load("evaluate-metric/cer", cache_dir=model_args.cache_dir)
 
-    logger.info("\n----set optimizer & scheduler")
+    logger.info("\n---- set optimizer & scheduler ----")
     if train_args.max_steps != -1:
         optimizer = AdamW(
             params=model.parameters(),
@@ -145,16 +142,16 @@ def main(parser: HfArgumentParser) -> None:
         scheduler = get_tri_stage_scheduler_with_warmup(
             optimizer=optimizer,
             num_training_steps=train_args.max_steps,
-            final_lr=train_args.final_learning_rate,
-            num_warmup_steps=train_args.ramp_up_step_ratio,
-            num_hold_steps=train_args.hold_step_ratio,
-            num_decay_steps=train_args.decay_step_ratio,
+            final_lr=model_args.final_learning_rate,
+            num_warmup_steps=model_args.ramp_up_step_ratio,
+            num_hold_steps=model_args.hold_step_ratio,
+            num_decay_steps=model_args.decay_step_ratio,
         )
         optimizers = (optimizer, scheduler)
     else:
         optimizers = (None, None)
 
-    logger.info("\n----set trainer")
+    logger.info("\n---- set trainer ----")
     collator = TransformerTransducerCollator(
         tokenizer,
         extractor=extractor,
@@ -174,24 +171,28 @@ def main(parser: HfArgumentParser) -> None:
     )
 
     if train_args.do_train:
-        logger.info("\n----run train")
         if train_args.do_fist_predict:
-            predict()
+            logger.info("\n---- run fisrt predict ----")
+            predict(trainer, clean_data, train_args, "clean")
+            predict(trainer, other_data, train_args, "other")
+
+        logger.info("\n---- run train ----")
         train(trainer, train_args)
+
     if train_args.do_eval:
-        logger.info("\n----run eval")
+        logger.info("\n---- run eval ----")
         eval(trainer, valid_data, train_args)
+
     if train_args.do_predict:
-        logger.info("\n----run predict")
-        predict(trainer, clean_data, train_args, "clean")
-        predict(trainer, other_data, train_args, "other")
+        logger.info("\n---- run predict ----")
+        predict(trainer, clean_data, train_args, "clean", save=True)
+        predict(trainer, other_data, train_args, "other", save=True)
 
 
 def train(trainer: Seq2SeqTrainer, args: Namespace) -> None:
     """doc"""
-    # with profile(activities=[ProfilerActivity.CUDA], profile_memory=True, use_cuda=True) as prof:
     outputs = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
-    # prof.export_chrome_trace("trace.json")
+
     if is_main_process(args.local_rank):
         model_name = trainer.model.name_or_path
         save_path = os.path.join(args.output_dir, model_name)
@@ -214,15 +215,22 @@ def eval(trainer: Seq2SeqTrainer, dataset: datasets.Dataset, args: Namespace) ->
         trainer.save_metrics("valid", metrics)
 
 
-def predict(trainer: Seq2SeqTrainer, dataset: datasets.Dataset, args: Namespace, prefix: Optional[str] = None) -> None:
+def predict(
+    trainer: Seq2SeqTrainer,
+    dataset: datasets.Dataset,
+    args: Namespace,
+    prefix: Optional[str] = None,
+    save: bool = False,
+) -> None:
     """doc"""
     outputs = trainer.predict(dataset, key_prefix=prefix)
     metrics = outputs.metrics
+    logger.info(f"{prefix}: {metrics}")
 
-    predictions = metrics.predictions
-    references = metrics.label_ids
+    if is_main_process(args.local_rank) and save:
+        predictions = metrics.predictions
+        references = metrics.label_ids
 
-    if is_main_process(args.local_rank):
         model_name = trainer.model.name_or_path
         save_path = os.path.join(args.output_dir, model_name)
 

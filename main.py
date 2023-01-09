@@ -1,5 +1,4 @@
 import io
-import logging
 import os
 from argparse import Namespace
 from typing import Any, Dict, List, Optional
@@ -15,10 +14,12 @@ from setproctitle import setproctitle
 from torch.optim import AdamW
 from trainer import TransducerTrainer
 from transformers import HfArgumentParser, Seq2SeqTrainer, set_seed
+from transformers.utils import logging
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
 from utils import DataArguments, ModelArguments, TransducerTrainArgument, get_tri_stage_scheduler_with_warmup
 
+logging.set_verbosity_info()
 logger = logging.getLogger("transformers")
 
 

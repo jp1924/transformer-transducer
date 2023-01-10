@@ -16,14 +16,9 @@ def get_tri_stage_scheduler_with_warmup(
     last_epoch: int = -1,
 ) -> LambdaLR:
     """doc"""
-    check_warmup_type = isinstance(num_warmup_steps, int)
-    warmup_steps = num_warmup_steps if check_warmup_type else (num_warmup_steps * num_training_steps)
-
-    check_hold_type = isinstance(num_hold_steps, int)
-    hold_steps = num_hold_steps if check_hold_type else (num_hold_steps * num_training_steps)
-
-    check_decay_type = isinstance(num_decay_steps, int)
-    decay_steps = num_decay_steps if check_decay_type else (num_decay_steps * num_training_steps)
+    warmup_steps = num_warmup_steps if num_warmup_steps > 1 else (num_warmup_steps * num_training_steps)
+    hold_steps = num_hold_steps if num_hold_steps > 1 else (num_hold_steps * num_training_steps)
+    decay_steps = num_decay_steps if num_decay_steps > 1 else (num_decay_steps * num_training_steps)
 
     if not (warmup_steps + hold_steps + decay_steps) <= num_training_steps:
         raise ValueError(

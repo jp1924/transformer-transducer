@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from transformers import PretrainedConfig
 from transformers.activations import ACT2FN
 from transformers.file_utils import is_torchaudio_available
@@ -986,7 +987,9 @@ class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
         synced_gpus: Optional[bool] = False,
         **model_kwargs,
     ) -> Union[GreedySearchOutput, torch.LongTensor]:
-        # [NOTE]: logits_processor
+        # [NOTE]: Still working on generate, so annotation may be korean
+        #         but it's working wall! generate code need to set huggingface style
+
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
         stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
 
@@ -1031,7 +1034,7 @@ class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
         decoder_state = decoder_outputs.last_hidden_states
         encoder_state = encoder_outputs.last_hidden_states
         feature_length = encoder_state.shape[1] - 1
-        # [NOTE]: 모든 index는 0번에서 시작하기 때문에 index에 맞추기 위해서는 1을 제거할 필요가 있다.
+
         repeat_count = 0
         decoding_list = list()
         state_iter = enumerate(zip(encoder_state, decoder_state))

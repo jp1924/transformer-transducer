@@ -53,14 +53,12 @@ class TransducerTrainer(Seq2SeqTrainer):
         with self.compute_loss_context_manager():
             loss = self.compute_loss(model, inputs)
 
-        # [NOTE]: gaussian noise
+        # [NOTE]: add gaussian noise
         step = self.state.global_step
-        if (step > 10000 and self.model.training) and (self.args.gradient_accumulation_steps % step == 0):
-            # [NOTE]: copied from https://discuss.pytorch.org/t/is-there-any-way-to-add-noise-to-trained-weights/29829/2
-            with torch.no_grad():
-                for param, name in zip(model.parameters(), model.named_parameters()):
-                    if "weight" in name:
-                        param.add_(noise(param))
+        accumulate_check = (step % self.args.gradient_accumulation_steps) == 0
+        noise_check = self.args.noise_step > 1
+        if (step > self.args.noise_step and self.model.training) and (accumulate_check and noise_check):
+            noise(model)
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training

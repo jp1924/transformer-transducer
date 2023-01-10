@@ -25,5 +25,5 @@ class ModelArguments:
     )
     final_learning_rate: float = field(
         default=0.0,
-        metadata={"help": "tri-stage의 끛 lr값을 설정합니다."},
+        metadata={"help": "tri-stage의 끝 lr값을 설정합니다."},
     )

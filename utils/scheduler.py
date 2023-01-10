@@ -7,7 +7,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 # [NOTE]: copied from https://github.com/facebookresearch/fairseq/blob/main/fairseq/optim/lr_scheduler/tri_stage_lr_scheduler.py
 def get_tri_stage_scheduler_with_warmup(
-    optimizer,
+    optimizer: Optimizer,
     num_training_steps: int,
     final_lr: float,
     num_warmup_steps: Union[int, float],

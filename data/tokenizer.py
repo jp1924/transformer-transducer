@@ -21,6 +21,7 @@ import sys
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import torch
 from transformers.tokenization_utils import PreTrainedTokenizer, _insert_one_token_to_ordered_list
 from transformers.tokenization_utils_base import AddedToken
 from transformers.utils import logging, to_py_obj
@@ -177,10 +178,10 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
     # because we need docs for `output_char_offsets` here
     def batch_decode(
         self,
-        sequences: Union[List[int], List[List[int]], "np.ndarray", "torch.Tensor", "tf.Tensor"],
+        sequences: Union[List[int], List[List[int]], np.ndarray, torch.Tensor],
         skip_special_tokens: bool = False,
     ) -> List[str]:
-        """ """
+        """"""
         batch_decoded = [
             self.decode(
                 seq,
@@ -195,7 +196,7 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
     # and `output_word_offsets` here
     def decode(
         self,
-        token_ids: Union[int, List[int], "np.ndarray", "torch.Tensor", "tf.Tensor"],
+        token_ids: Union[int, List[int], np.ndarray, torch.Tensor],
         skip_special_tokens: bool = False,
     ) -> str:
         """"""

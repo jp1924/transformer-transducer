@@ -12,3 +12,7 @@ class TransducerTrainArgument(Seq2SeqTrainingArguments):
         default=False,
         metadata={"help": "만약 model을 checkpoint로 부터 불러오거나 재개 했을 때 모델의 성능을 측정하기 위해 사용하는 값"},
     )
+    noise_step: int = field(
+        default=-1,
+        metadata={"help": "gausian_noise를 추가하는 스탭을 선택합니다."},
+    )

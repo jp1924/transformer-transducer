@@ -180,46 +180,7 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
         sequences: Union[List[int], List[List[int]], "np.ndarray", "torch.Tensor", "tf.Tensor"],
         skip_special_tokens: bool = False,
     ) -> List[str]:
-        """
-        Convert a list of lists of token ids into a list of strings by calling decode.
-
-        Args:
-            sequences (`Union[List[int], List[List[int]], np.ndarray, torch.Tensor, tf.Tensor]`):
-                List of tokenized input ids. Can be obtained using the `__call__` method.
-            skip_special_tokens (`bool`, *optional*, defaults to `False`):
-                Whether or not to remove special tokens in the decoding.
-            clean_up_tokenization_spaces (`bool`, *optional*, defaults to `True`):
-                Whether or not to clean up the tokenization spaces.
-            output_char_offsets (`bool`, *optional*, defaults to `False`):
-                Whether or not to output character offsets. Character offsets can be used in combination with the
-                sampling rate and model downsampling rate to compute the time-stamps of transcribed characters.
-
-                <Tip>
-
-                Please take a look at the Example of [`~models.wav2vec2.tokenization_wav2vec2.decode`] to better
-                understand how to make use of `output_word_offsets`.
-                [`~model.wav2vec2.tokenization_wav2vec2.batch_decode`] works the same way with batched output.
-
-                </Tip>
-
-            output_word_offsets (`bool`, *optional*, defaults to `False`):
-                Whether or not to output word offsets. Word offsets can be used in combination with the sampling rate
-                and model downsampling rate to compute the time-stamps of transcribed words.
-
-                <Tip>
-
-                Please take a look at the Example of [`~models.wav2vec2.tokenization_wav2vec2.decode`] to better
-                understand how to make use of `output_word_offsets`.
-                [`~model.wav2vec2.tokenization_wav2vec2.batch_decode`] works the same way with batched output.
-
-                </Tip>
-
-            kwargs (additional keyword arguments, *optional*):
-                Will be passed to the underlying model specific decode method.
-
-        Returns:
-            `List[str]`
-        """
+        """ """
         batch_decoded = [
             self.decode(
                 seq,

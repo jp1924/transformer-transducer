@@ -7,7 +7,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 # [NOTE]: copied from https://github.com/facebookresearch/fairseq/blob/main/fairseq/optim/lr_scheduler/tri_stage_lr_scheduler.py
 def get_tri_stage_scheduler_with_warmup(
-    optimizer: Optimizer,
+    optimizer,
     num_training_steps: int,
     final_lr: float,
     num_warmup_steps: Union[int, float],
@@ -16,9 +16,9 @@ def get_tri_stage_scheduler_with_warmup(
     last_epoch: int = -1,
 ) -> LambdaLR:
     """doc"""
-    warmup_steps = num_warmup_steps if num_warmup_steps > 1 else (num_warmup_steps * num_training_steps)
-    hold_steps = num_hold_steps if num_hold_steps > 1 else (num_hold_steps * num_training_steps)
-    decay_steps = num_decay_steps if num_decay_steps > 1 else (num_decay_steps * num_training_steps)
+    warmup_steps = num_warmup_steps if num_warmup_steps >= 1 else (num_warmup_steps * num_training_steps)
+    hold_steps = num_hold_steps if num_hold_steps >= 1 else (num_hold_steps * num_training_steps)
+    decay_steps = num_decay_steps if num_decay_steps >= 1 else (num_decay_steps * num_training_steps)
 
     if not (warmup_steps + hold_steps + decay_steps) <= num_training_steps:
         raise ValueError(
@@ -55,10 +55,10 @@ def get_tri_stage_scheduler_with_warmup(
             learning_rate = (warmup_factpr * step) + compensator
         elif "hold" == stage:
             compensator = default_lr
-            learning_rate = default_lr**compensator
+            learning_rate = math.ceil(default_lr**compensator)
         elif "decay" == stage:
             compensator = default_lr
-            learning_rate = (default_lr**compensator) * math.exp(-decay_factor * step)
+            learning_rate = math.ceil(default_lr**compensator) * math.exp(-decay_factor * step)
         elif "over" == stage:
             learning_rate = final_lr
 

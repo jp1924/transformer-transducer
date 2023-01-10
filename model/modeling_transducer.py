@@ -110,7 +110,7 @@ class RNNTBaseOutput(ModelOutput):
     decoder_hidden_states: Optional[torch.Tensor] = None
 
 
-class TransformerTransducerPretrainedModel(PreTrainedModel):
+class TransformerTransducerPreTrainedModel(PreTrainedModel):
     config_class = TransformerTransducerConfig
     base_model_prefix = "transformertransducer"
     main_input_name = "input_features"
@@ -384,9 +384,9 @@ class TransformerTransducerEncoderLayer(nn.Module):
         return outputs
 
 
-class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
+class TransformerTransducerDecoder(TransformerTransducerPreTrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
-        super(TransformerTransducerPretrainedModel, self).__init__(config)
+        super(TransformerTransducerPreTrainedModel, self).__init__(config)
         self.config = config
         self.layerdrop = config.decoder_layerdrop
 
@@ -544,9 +544,9 @@ class TransformerTransducerDecoder(TransformerTransducerPretrainedModel):
         )
 
 
-class TransformerTransducerEncoder(TransformerTransducerPretrainedModel):
+class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
-        super(TransformerTransducerPretrainedModel, self).__init__(config)
+        super(TransformerTransducerPreTrainedModel, self).__init__(config)
         self.config = config
         self.attention_type = self.config.attention_type
         self.layerdrop = config.encoder_layerdrop
@@ -777,9 +777,9 @@ class TransformerTransducerJoiner(nn.Module):
         )
 
 
-class TransformerTransducerModel(TransformerTransducerPretrainedModel):
+class TransformerTransducerModel(TransformerTransducerPreTrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
-        super(TransformerTransducerPretrainedModel, self).__init__(config)
+        super(TransformerTransducerPreTrainedModel, self).__init__(config)
         self.config = config
 
         self.encoder = TransformerTransducerEncoder(config)
@@ -873,7 +873,7 @@ class TransformerTransducerModel(TransformerTransducerPretrainedModel):
         )
 
 
-class TransformerTransducerForRNNT(TransformerTransducerPretrainedModel):
+class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
         super().__init__(config)
         self.config = config

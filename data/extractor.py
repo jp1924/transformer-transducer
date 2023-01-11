@@ -91,18 +91,20 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         feature_size: int = 80,
         sampling_rate: int = 16000,
         hop_length: int = 160,
+        stack: int = 4,
+        stride: int = 3,
         power: int = 2.0,
-        window_fn: Callable = None,  # temp
         center: bool = True,
+        window_fn: Callable = None,
+        mel_scale: str = "slaney",
+        filter_norm: Optional[str] = None,
         min_frequency: float = 0.0,
         max_frequency: Optional[float] = None,
-        mel_scale: str = "slaney",
-        stack: Optional[int] = 4,  # value from transformer-transducer paper
-        stride: Optional[int] = 3,  # value from transformer-transducer paper
         padding_value: float = 0.0,
         return_attention_mask: bool = False,  # pad inputs to max length with silence token (zero) and no attention mask
         **kwargs,
     ):
+        """"""
         super().__init__(
             feature_size=feature_size,
             sampling_rate=sampling_rate,
@@ -110,21 +112,25 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
             return_attention_mask=return_attention_mask,
             **kwargs,
         )
-        assert self.stack is not None or self.stride is not None, "windowing이 정상적으로 작동하지 않습니다!"
+        if not (stack and stride):
+            raise ValueError()
 
-        # [NOTE]: copied from torchaudio MelScale
         check_max_freq = max_frequency is not None
         self.f_max = max_frequency if check_max_freq else float(sampling_rate // 2)
         self.f_min = min_frequency
 
         # [NOTE]: for Log-MelSpectrogram
         self.n_fft = n_fft
+        self.feature_size = feature_size
+        self.sampling_rate = sampling_rate
         self.hop_length = hop_length
         self.sampling_rate = sampling_rate
         self.mel_scale = mel_scale
         self.center = center
         self.power = power
-        self.mel_filter = self.get_mel_filter(n_mels=feature_size, mel_scale=self.mel_scale)
+        self.filter_norm = filter_norm
+
+        self.mel_filter = self.get_mel_filter(n_mels=feature_size, scale=self.mel_scale, norm=self.filter_norm)
 
         self.stack = stack
         self.stride = stride
@@ -132,26 +138,24 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         # [NOTE]: set window func
         self.window = window_fn(self.n_fft) if window_fn else np.hanning(self.n_fft)
 
-    def mel_compressor(self, mel_feature: Union[np.ndarray, List[List[float]]]) -> np.ndarray:
-        """mel을 windowing을 적용시켜 값을 압축시킨다."""
+    def mel_compressor(self, mel_spectrogram: Union[np.ndarray, List[List[float]]]) -> np.ndarray:
+        """"""
         # [NOTE]: 여기서 각각의 멜을 windowing + padding한 뒤 나머지 compress_mel을 padding하는 방식으로 진행해야 할 듯 하다.
         #         compress_features에서 padding을 처리하지 않고 하기에는 self._pad를 overriding해서 새로 만들어야 함.
 
-        if isinstance(mel_feature, list):
-            mel_feature = np.array(mel_feature)
+        if isinstance(mel_spectrogram, list):
+            mel_spectrogram = np.array(mel_spectrogram)
 
-        time_steps, _ = mel_feature.shape
+        time_steps, _ = mel_spectrogram.shape
         expected_len = math.ceil(time_steps / self.stride)
 
         mel_store = list()
-        # [TODO]: left, right context하고 data전처리 간의 어떤 연관이 있는지 모르겠다.
         for stack_num in range(self.stack):
             idx_iter = range(0, (time_steps - stack_num), self.stride)
             indices = [stack_num + idx for idx in idx_iter]
 
-            features = mel_feature[indices]
+            features = mel_spectrogram[indices]
             pad_width = ((0, expected_len - features.shape[0]), (0, 0))
-            # 더 간단한 방법이 있지만 그렇게 하기에는 너무 대충한 느낌이 든다.
             features = np.pad(features, pad_width)
 
             mel_store.append(features)
@@ -162,21 +166,20 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
     def get_mel_filter(
         self,
         n_mels: int = 128,
-        dtype=np.float32,
+        scale: str = "slaney",
         norm: Optional[str] = None,
-        mel_scale: str = "slaney",
     ) -> np.ndarray:
-
-        n_freqs = self.n_fft // 2 + 1
-        fb = np.zeros((n_freqs, n_mels), dtype=dtype)
+        """"""
+        n_freqs = self.n_fft // (2 + 1)
+        fb = np.zeros((n_freqs, n_mels), dtype=np.float32)
         all_freqs = np.linspace(0, self.sampling_rate // 2, n_freqs)
 
-        m_min = hz_to_mel(self.f_min, mel_scale)
-        m_max = hz_to_mel(self.f_max, mel_scale)
+        m_min = hz_to_mel(self.f_min, scale)
+        m_max = hz_to_mel(self.f_max, scale)
 
         # n_mels is chennel_size
         m_pts = np.linspace(m_min, m_max, n_mels + 2)
-        freqs = mel_to_hz(m_pts, mel_scale)
+        freqs = mel_to_hz(m_pts, scale)
 
         f_diff = freqs[1:] - freqs[:-1]
         slopes = freqs[np.newaxis, :] - all_freqs[:, np.newaxis]
@@ -202,7 +205,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
             )
 
         # Slaney-style mel is scaled to be approx constant energy per channel
-
+        fb = np.transpose(fb, (1, 0))  # it's for matmul
         return fb
 
     # [NOTE]: copied from https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/feature_extraction_whisper.py#L135-L169
@@ -216,8 +219,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         """
         frames = []
         for i in range(0, waveform.shape[0] + 1, self.hop_length):
-            half_window = (self.n_fft - 1) // 2 + 1
-            # half_window = (self.n_fft) // 2 + 1
+            half_window = (self.n_fft - 1) // (2 + 1)
 
             if center:
                 start = i - half_window if i > half_window else 0
@@ -242,6 +244,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
                     )
 
             frames.append(frame)
+
         return np.stack(frames, 0)
 
     # [NOTE]: copied from https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/feature_extraction_whisper.py#L171-L196
@@ -273,7 +276,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         return data.T
 
     # [NOTE]: copied from https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/feature_extraction_whisper.py#L198-L216
-    def numpy_mel_spectrogram(self, waveform: np.ndarray) -> np.ndarray:
+    def get_mel_spectrogram(self, waveform: np.ndarray) -> np.ndarray:
         """
         Compute the log-Mel spectrogram of the provided audio, gives similar results whisper's original torch
         implementation with 1e-5 tolerance.
@@ -282,30 +285,31 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         frames = self.fram_wave(waveform, center=self.center)
         stft = self.stft(frames, self.window)
 
-        # magnitudes = np.abs(stft[:, :-1]) ** 2
         magnitudes = np.abs(stft) ** self.power
-
-        filters = np.transpose(self.mel_filter, (1, 0))
-        mel_spec = np.matmul(filters, magnitudes)
+        mel_spec = np.matmul(self.mel_filter, magnitudes)
 
         return mel_spec
 
-    def apply_log(self, mel_features: np.ndarray) -> np.ndarray:
-        log_spec = np.log10(np.clip(mel_features, a_min=1e-10, a_max=None))
-        log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
+    def apply_log(self, mel_spectrogram: np.ndarray) -> np.ndarray:
+        """"""
+        log_mel = np.log10(np.clip(mel_spectrogram, a_min=1e-10, a_max=None))
+        log_mel = np.maximum(log_mel, log_mel.max() - 8.0)
 
-        # [NOTE]: log scale
-        log_mel = (log_spec + 4.0) / 4.0
+        # [NOTE]: apply log scale
+        log_mel = (log_mel + 4.0) / 4.0
         return log_mel
 
     def log_mel_transform(self, raw_speechs: Union[List[np.ndarray], np.ndarray], do_numpy: bool = False) -> np.ndarray:
         # [NOTE]: do_numpy is temporarily left because data preprocessing is executed again when the code of the preprocessor changes.
+        """"""
         if not isinstance(raw_speechs, list):
             raw_speechs = [raw_speechs]
 
-        mel_features = [self.numpy_mel_spectrogram(waveform) for waveform in raw_speechs]
-        log_mel_spectrograms = [self.apply_log(mel[:, :-1]) for mel in mel_features]
-        log_mel_spectrograms = [np.transpose(log_mel, (1, 0)) for log_mel in log_mel_spectrograms]  # transpose
+        mel_spectrogram = [self.get_mel_spectrogram(waveform) for waveform in raw_speechs]
+        log_mel_spectrograms = [self.apply_log(mel[:, :-1]) for mel in mel_spectrogram]
+        log_mel_spectrograms = [
+            np.transpose(log_mel, (1, 0)) for log_mel in log_mel_spectrograms
+        ]  # transpose for model
 
         return log_mel_spectrograms
 

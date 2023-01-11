@@ -3,13 +3,7 @@ import warnings
 from typing import Callable, List, Optional, Union
 
 import numpy as np
-import torch
 from numpy.fft import fft
-from transformers.file_utils import is_torchaudio_available
-
-if is_torchaudio_available():
-    from torchaudio.transforms import MelSpectrogram, Spectrogram
-    import torchaudio.functional as F
 
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
@@ -91,8 +85,6 @@ def mel_to_hz(mels: np.ndarray, mel_scale: str = "htk") -> np.ndarray:
 class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
     model_input_names = ["input_features", "attention_mask"]
 
-    # feature_size: 128, n_fft: 512, hop_length: 256(win_length(n_fft) / 2)
-    # 400 / 16000 = 0.025
     def __init__(
         self,
         n_fft: int = 400,
@@ -118,6 +110,8 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
             return_attention_mask=return_attention_mask,
             **kwargs,
         )
+        assert self.stack is not None or self.stride is not None, "windowing이 정상적으로 작동하지 않습니다!"
+
         # [NOTE]: copied from torchaudio MelScale
         check_max_freq = max_frequency is not None
         self.f_max = max_frequency if check_max_freq else float(sampling_rate // 2)
@@ -132,27 +126,11 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         self.power = power
         self.mel_filter = self.get_mel_filter(n_mels=feature_size, mel_scale=self.mel_scale)
 
-        # window = np.hanning(self.n_fft + 1)[:-1]
-        self.window = np.hanning(self.n_fft)
-
-        if is_torchaudio_available():
-            self.window_fn: torch.Tensor = lambda x: torch.tensor(np.hanning(x), dtype=torch.float32)
-            self.mel_transform = MelSpectrogram(
-                n_fft=self.n_fft,
-                n_mels=self.feature_size,
-                sample_rate=self.sampling_rate,
-                hop_length=self.hop_length,
-                window_fn=self.window_fn,
-                pad_mode="reflect",
-                center=self.center,
-                mel_scale=self.mel_scale,
-                power=self.power,
-            )
-        # [NOTE]: for compression
         self.stack = stack
         self.stride = stride
 
-        assert self.stack is not None or self.stride is not None, "windowing이 정상적으로 작동하지 않습니다!"
+        # [NOTE]: set window func
+        self.window = window_fn(self.n_fft) if window_fn else np.hanning(self.n_fft)
 
     def mel_compressor(self, mel_feature: Union[np.ndarray, List[List[float]]]) -> np.ndarray:
         """mel을 windowing을 적용시켜 값을 압축시킨다."""
@@ -312,14 +290,6 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
 
         return mel_spec
 
-    # [NOTE]: idea come from https://github.com/anton-l/transformers/blob/2a21426a5807195610c6b832c00c2813c3e25253/src/transformers/models/emformer/feature_extraction_emformer.py#L100-L111
-    def torch_mel_spectrogram(self, waveform: np.ndarray) -> np.ndarray:
-        waveform = torch.tensor(waveform, dtype=torch.float32)
-        mel_spec = self.mel_transform(waveform)
-        mel_spec = mel_spec.numpy()
-
-        return mel_spec
-
     def apply_log(self, mel_features: np.ndarray) -> np.ndarray:
         log_spec = np.log10(np.clip(mel_features, a_min=1e-10, a_max=None))
         log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
@@ -329,19 +299,13 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         return log_mel
 
     def log_mel_transform(self, raw_speechs: Union[List[np.ndarray], np.ndarray], do_numpy: bool = False) -> np.ndarray:
+        # [NOTE]: do_numpy is temporarily left because data preprocessing is executed again when the code of the preprocessor changes.
         if not isinstance(raw_speechs, list):
             raw_speechs = [raw_speechs]
 
-        if is_torchaudio_available() and not do_numpy:
-            # [BUG]: multi-processing중에 무한루프에 걸리는 버그가 있음
-            mel_features = [self.torch_mel_spectrogram(waveform) for waveform in raw_speechs]
-        else:
-            mel_features = [self.numpy_mel_spectrogram(waveform) for waveform in raw_speechs]
-
+        mel_features = [self.numpy_mel_spectrogram(waveform) for waveform in raw_speechs]
         log_mel_spectrograms = [self.apply_log(mel[:, :-1]) for mel in mel_features]
-
-        # transpose
-        log_mel_spectrograms = [np.transpose(log_mel, (1, 0)) for log_mel in log_mel_spectrograms]
+        log_mel_spectrograms = [np.transpose(log_mel, (1, 0)) for log_mel in log_mel_spectrograms]  # transpose
 
         return log_mel_spectrograms
 
@@ -428,9 +392,6 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
             raw_speech = [raw_speech]
 
         log_mel_features = self.log_mel_transform(raw_speech)
-
-        # [NOTE]: I don't know why, but in the field of voice processing,
-        #         it is processed as time_seq and mel_seq. So, I do traspose as below.
         compressed_features = [self.mel_compressor(log_mel) for log_mel in log_mel_features]
         batched_mel = BatchFeature({"input_features": compressed_features})
 

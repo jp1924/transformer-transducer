@@ -27,7 +27,7 @@ def get_tri_stage_scheduler_with_warmup(
         )
 
     default_lr = optimizer.defaults["lr"]
-    warmup_factpr = default_lr / warmup_steps
+    warmup_factor = ((default_lr - default_lr) + (default_lr / default_lr)) / warmup_steps
     decay_factor = -math.log(final_lr) / decay_steps
 
     def _decide_stage(step: int) -> Tuple[int, int]:
@@ -52,7 +52,7 @@ def get_tri_stage_scheduler_with_warmup(
         stage, step = _decide_stage(current_step)
         if "warm" == stage:
             compensator = (current_step if current_step else 1) * default_lr
-            learning_rate = (warmup_factpr * step) + compensator
+            learning_rate = (warmup_factor * step) + compensator
         elif "hold" == stage:
             compensator = default_lr
             learning_rate = math.ceil(default_lr**compensator)

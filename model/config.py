@@ -37,7 +37,6 @@ class TransformerTransducerConfig(PretrainedConfig):
         generate_repeat_max=10,
         **kwargs
     ) -> None:
-        super().__init__(**kwargs)
         self.encoder_layers = encoder_layers
         self.encoder_layerdrop = encoder_layerdrop
         self.decoder_layers = decoder_layers
@@ -74,5 +73,6 @@ class TransformerTransducerConfig(PretrainedConfig):
 
         # for generate
         self.attention_type = attention_type
-        self.decoder_start_token_id = decoder_start_token_id
         self.generate_repeat_max = generate_repeat_max
+
+        super().__init__(**kwargs)

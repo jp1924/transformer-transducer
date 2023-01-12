@@ -113,30 +113,27 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
             **kwargs,
         )
         if not (stack and stride):
-            raise ValueError()
-
-        check_max_freq = max_frequency is not None
-        self.f_max = max_frequency if check_max_freq else float(sampling_rate // 2)
-        self.f_min = min_frequency
+            raise ValueError("you must be set stride, stack, if you need to compress log_mel")
 
         # [NOTE]: for Log-MelSpectrogram
         self.n_fft = n_fft
         self.feature_size = feature_size
         self.sampling_rate = sampling_rate
         self.hop_length = hop_length
-        self.sampling_rate = sampling_rate
         self.mel_scale = mel_scale
         self.center = center
         self.power = power
         self.filter_norm = filter_norm
+        self.f_max = max_frequency if max_frequency else float(sampling_rate // 2)
+        self.f_min = min_frequency
 
+        # [NOTE]: for window at spectrogram
+        self.window = window_fn(self.n_fft) if window_fn else np.hanning(self.n_fft)
         self.mel_filter = self.get_mel_filter(n_mels=feature_size, scale=self.mel_scale, norm=self.filter_norm)
 
+        # [NOTE]: for compressor
         self.stack = stack
         self.stride = stride
-
-        # [NOTE]: set window func
-        self.window = window_fn(self.n_fft) if window_fn else np.hanning(self.n_fft)
 
     def mel_compressor(self, mel_spectrogram: Union[np.ndarray, List[List[float]]]) -> np.ndarray:
         """"""

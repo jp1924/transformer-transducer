@@ -41,11 +41,20 @@ else:
 
 logger = logging.get_logger(__name__)
 
+# TODO-list
+# - [ ] Self-Attention relative-embedding check
+# - [ ] DP training check
+# - [ ] Add Doc-String
+# - [ ] Change name of outputs
+# - [ ] generate check
+#   - [ ] greedy-searcg clean code
+#   - [ ] duplecation delete check
+#   - [ ] Beam-Search check(optional)
+
 
 _CHECKPOINT_FOR_DOC = "transformer-transducer-960h"
 _CONFIG_FOR_DOC = "TransformerTransducerConfig"
-_TOKENIZER_FOR_DOC = "TransformerTransducerTokenizer"
-_PROCESSOR_FOR_DOC = "Wav2Vec2Processor"
+_PROCESSOR_FOR_DOC = "TransformerTransducerProcessor"
 _EXPECTED_OUTPUT_SHAPE = [1, 292, 768]
 
 TRANSFORMER_TRANSDUCER_PRETRAINED_MODEL_ARCHIVE_LIST = [

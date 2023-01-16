@@ -19,9 +19,18 @@ from transformers.generation_utils import (
     GreedySearchOutput,
 )
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import ModelOutput, logging
+from transformers.utils import (
+    ModelOutput,
+    logging,
+    add_start_docstrings,
+    add_start_docstrings_to_model_forward,
+    add_end_docstrings,
+    add_code_sample_docstrings,
+    replace_return_docstrings,
+)
 
 from .config import TransformerTransducerConfig
+
 
 if is_torchaudio_available():
     from torchaudio.transforms import FrequencyMasking, RNNTLoss, TimeMasking
@@ -33,7 +42,16 @@ else:
 logger = logging.get_logger(__name__)
 
 
-TRANSFORMER_TRANSDUCER_MODEL_ARCHIVE_LIST = ["jp42maru/transformer-transducer-960h"]
+_CHECKPOINT_FOR_DOC = "transformer-transducer-960h"
+_CONFIG_FOR_DOC = "TransformerTransducerConfig"
+_TOKENIZER_FOR_DOC = "TransformerTransducerTokenizer"
+_PROCESSOR_FOR_DOC = "Wav2Vec2Processor"
+_EXPECTED_OUTPUT_SHAPE = [1, 292, 768]
+
+TRANSFORMER_TRANSDUCER_PRETRAINED_MODEL_ARCHIVE_LIST = [
+    "jp42maru/transformer-transducer-960h",
+    # See all TransformerTransducer models at https://huggingface.co/models?filter=transformer_transducer
+]
 
 
 def _make_causal_mask(input_ids_shape: torch.Size, dtype: torch.dtype, past_key_values_length: int = 0):
@@ -62,7 +80,7 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
 
     inverted_mask = 1.0 - expanded_mask
 
-    return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
+    return inverted_mask.masked_fill(inverted_mask.bool(), torch.finfo(dtype).min)
 
 
 # [TODO]: it's must be changed huggingface outputs style
@@ -90,6 +108,17 @@ class TransformerTransducerJoinerOutput(ModelOutput):
 
 @dataclass
 class TransducerBaseModelOutput(ModelOutput):
+    """
+    Args:
+        logits[batch, mel_seq, label_seq, vocab_size]: outputs from joiner
+
+        encoder_hidden_states[batch, mel_seq, hidden]: hidden_states from audio encoders
+        encoder_attentions[batch, mel_seq, hidden]: attentions from audio encoders
+
+        decoder_hidden_states[batch, label_seq, hidden]: hidden_states from label encoder
+        decoder_attentions[batch, label_seq, hidden]: attentions from label encoder
+    """
+
     logits: torch.Tensor
 
     encoder_hidden_states: Optional[torch.Tensor] = None
@@ -99,8 +128,19 @@ class TransducerBaseModelOutput(ModelOutput):
     decoder_attentions: Optional[torch.Tensor] = None
 
 
+# [XXX]: i think, it should change CausalLMOutput
 @dataclass
 class RNNTBaseOutput(ModelOutput):
+    """
+    Args:
+        loss:
+        logits:
+        encoder_attentions
+        decoder_attentions
+        encoder_hidden_states
+        decoder_hidden_states
+    """
+
     loss: Optional[torch.Tensor] = None
     logits: Optional[torch.Tensor] = None
 
@@ -110,36 +150,6 @@ class RNNTBaseOutput(ModelOutput):
     decoder_hidden_states: Optional[torch.Tensor] = None
 
 
-class TransformerTransducerPreTrainedModel(PreTrainedModel):
-    config_class = TransformerTransducerConfig
-    base_model_prefix = "transformertransducer"
-    main_input_name = "input_features"
-    _keys_to_ignore_on_load_missing = [r"position_ids"]
-    supports_gradient_checkpointing = False
-    # im not sure, model can support gradient_checkpointing. it's need expriments
-
-    def _init_weights(self, module: nn.Module) -> None:
-        """Initialize the weights"""
-        if isinstance(module, nn.Linear):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
-
-    def _set_gradient_checkpointing(self, module: nn.Module, value: bool = False) -> None:
-        if isinstance(module, TransformerTransducerEncoderLayer):
-            module.gradient_checkpointing = value
-
-
-# [NOTE]: copied from BertSelfAttention
 class TransformerTransducerAttention(nn.Module):
     def __init__(self, config: PretrainedConfig, position_embedding_type: Optional[str] = None):
         super().__init__()
@@ -227,6 +237,8 @@ class TransformerTransducerAttention(nn.Module):
         # [BUG]: relative positional embedding does not work!
         #        CUDA error: CUBLAS_STATUS_NOT_SUPPORTED when calling
         #        `cublasSgemmStridedBatched( handle, opa, opb, m, n, k, &alpha, a, lda, stridea, b, ldb, strideb, &beta, c, ldc, stridec, num_batches)`
+        #
+        #        >>> when seq length is 1, this error come out, This problem can occur because when generating, the next token is predicted by putting the blank token first.
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             seq_length = hidden_states.size()[1]
             position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
@@ -387,164 +399,187 @@ class TransformerTransducerEncoderLayer(nn.Module):
         return outputs
 
 
-class TransformerTransducerDecoder(TransformerTransducerPreTrainedModel):
-    def __init__(self, config: PretrainedConfig) -> None:
-        super(TransformerTransducerPreTrainedModel, self).__init__(config)
-        self.config = config
-        self.layerdrop = config.decoder_layerdrop
+class TransformerTransducerPreTrainedModel(PreTrainedModel):
+    config_class = TransformerTransducerConfig
+    main_input_name = "input_features"
+    _keys_to_ignore_on_load_missing = [r"position_ids"]
+    supports_gradient_checkpointing = False
+    # im not sure, model can support gradient_checkpointing. it's need expriments
 
-        decoder_layers = [TransformerTransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
-        self.layers = nn.ModuleList(decoder_layers)
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initialize the weights"""
+        if isinstance(module, nn.Linear):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
 
-        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        self.word_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+    def _set_gradient_checkpointing(self, module: nn.Module, value: bool = False) -> None:
+        if isinstance(module, TransformerTransducerEncoderLayer):
+            module.gradient_checkpointing = value
 
-        self.gradient_checkpointing = False
-        # Initialize weights and apply final processing
-        self.post_init()
 
-    def _prepare_decoder_attention_mask(
-        self,
-        input_shape: Tuple[int],
-        inputs_embeds: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values_length: int = 0,
-    ) -> torch.Tensor:
-        # [NOTE]: 원래 attention_mask는 Optional이 아니였음.
-        #         무조건 값이 들어오도록 만들었어야 했을 것 같지만
-        #         `attention_mask is not None` 로 된 구문을 봤을 때 단순 버그라 생각된다.
-        #         _prepare_decoder_attention_mask는 generate시 생성되는 문장 만큼 attention_mask 생성하기 위해
-        #         attention_mask가 들어오지 않는 경우에 mask를 생성하는 기능을 추가해 놓은 듯 하다.
+TRANSFORMER_TRANSDUCER_START_DOCSTRING = r"""
+    This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic
+    methods the library implements for all its model (such as downloading or saving, resizing the input embeddings,
+    pruning heads etc.)
 
-        # create causal mask
-        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-        combined_attention_mask = None
-        if input_shape[-1] > 1:
-            combined_attention_mask = _make_causal_mask(
-                input_shape, inputs_embeds.dtype, past_key_values_length=past_key_values_length
-            ).to(inputs_embeds.device)
+    This model is also a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module)
+    subclass. Use it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to
+    general usage and behavior.
 
-        if attention_mask is not None:
-            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])
-            combined_attention_mask = (
-                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
-            )
+    Parameters:
+        config ([`~TransformerTransducerConfig`]):
+            Model configuration class with all the parameters of the model.
+            Initializing with a config file does not load the weights associated with the model, only the
+            configuration. Check out the [`~PreTrainedModel.from_pretrained`] method to load the model
+            weights.
+"""
 
-        return combined_attention_mask
+TRANSFORMER_TRANSDUCER_GENERATION_EXAMPLE = r"""
+    Summarization example:
 
-    def forward(
-        self,
-        labels: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask: Optional[torch.LongTensor] = None,
-        output_attentions: Optional[torch.Tensor] = None,
-        output_hidden_states: Optional[bool] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        cross_head_mask: Optional[torch.Tensor] = None,
-        self_head_mask: Optional[torch.Tensor] = None,
-        use_cache: Optional[bool] = False,
-        return_dict: Optional[bool] = True,
-    ) -> Union[EncoderOutput, Tuple[Any]]:
-        # [TODO]: change head mask name, cross, self head mask is not inappropriate name --------
+    ```python
+    >>> from transformers import TransformerTransducerTokenizer, TransformerTransducerForRNNT
 
-        attentions_flag = output_attentions is not None
-        output_attentions = output_attentions if attentions_flag else self.config.output_attentions
+    >>> model = TransformerTransducerForConditionalGeneration.from_pretrained('transformer-transducer-960h')
+    >>> tokenizer = TransformerTransducerTokenizer.from_pretrained('transformer-transducer-960h')
 
-        output_hidden_flag = output_hidden_states is not None
-        output_hidden_states = output_hidden_states if output_hidden_flag else self.config.output_hidden_states
+    >>> ARTICLE_TO_SUMMARIZE = "My friends are cool but they eat too many carbs."
+    >>> inputs = tokenizer([ARTICLE_TO_SUMMARIZE], max_length=1024, return_tensors='pt')
 
-        return_flag = return_dict is not None
-        return_dict = return_dict if return_flag else self.config.use_return_dict
+    >>> # Generate Summary
+    >>> summary_ids = model.generate(inputs['input_ids'], num_beams=4, max_length=5)
+    >>> print(tokenizer.decode(summary_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False))
+    ```
 
-        # [XXX]: it's may need functionalization
-        seq_length = labels.shape[1]
-        position_ids = self.position_ids[:, :seq_length]
-        position_embed = self.position_embeddings(position_ids)
-        word_embed = self.word_embedding(labels)
+    [TODO]: it's need to write doc-string!!!!
+    Returns:
+        [`{full_output_type}`] or `tuple(torch.FloatTensor)`: A [`{full_output_type}`] or a tuple of
+        `torch.FloatTensor` (if `return_dict=False` is passed or when `config.return_dict=False`) comprising various
+        elements depending on the configuration ([`{config_class}`]) and inputs.
+"""
 
-        hidden_states = word_embed + position_embed
+TRANSFORMER_TRANSDUCER_INPUTS_DOCSTRING = r"""
+    Args:
+        input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+            Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
+            it.
 
-        label_shape = labels.shape
-        attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask=attention_mask,
-            input_shape=label_shape,
-            inputs_embeds=position_embed,
-        )
+            Indices can be obtained using [`~TransformerTransducerTokenizer`]. See
+            [`PreTrainedTokenizer.encode`] and [`PreTrainedTokenizer.__call__`] for
+            details.
 
-        all_hidden_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-        all_cross_attentions = () if (output_attentions and encoder_hidden_states is not None) else None
-        next_decoder_cache = () if use_cache else None
-        if self_head_mask is not None:
-            if self_head_mask.size()[0] != (len(self.layers)):
-                raise ValueError(
-                    f"The head_mask should be specified for {len(self.layers)} layers, but it is for"
-                    f" {self_head_mask.size()[0]}."
-                )
+            [What are input IDs?](../glossary#input-ids)
+        attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
 
-        for idx, decoder_layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
-            # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
-            dropout_probability = random.uniform(0, 1)
-            if self.training and (dropout_probability < self.layerdrop):  # skip the layer
-                layer_outputs = (None, None)
-            else:
-                if self.gradient_checkpointing and self.training:
+            - 1 for tokens that are **not masked**,
+            - 0 for tokens that are **masked**.
 
-                    def create_custom_forward(module):
-                        def custom_forward(*inputs):
-                            return module(*inputs, output_attentions)
+            [What are attention masks?](../glossary#attention-mask)
+        decoder_input_ids (`torch.LongTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
+            Provide for translation and summarization training. By default, the model will create this tensor by
+            shifting the `input_ids` to the right, following the paper.
+        decoder_attention_mask (`torch.LongTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
+            Default behavior: generate a tensor that ignores pad tokens in `decoder_input_ids`. Causal mask will
+            also be used by default.
 
-                        return custom_forward
+            If you want to change padding behavior, you should read [`modeling_transformer_transducer._prepare_decoder_attention_mask`] and
+            modify to your needs. See diagram 1 in [the paper](https://arxiv.org/abs/1910.13461) for more
+            information on the default strategy.
+        head_mask (`torch.Tensor` of shape `(encoder_layers, encoder_attention_heads)`, *optional*):
+            Mask to nullify selected heads of the attention modules in the encoder. Mask values selected in `[0, 1]`:
 
-                    layer_outputs = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(decoder_layer),
-                        hidden_states,
-                        attention_mask,
-                        (self_head_mask[idx] if self_head_mask is not None else None),
-                    )
-                else:
-                    layer_outputs = decoder_layer(
-                        hidden_states=hidden_states,
-                        attention_mask=attention_mask,
-                        self_head_mask=(self_head_mask[idx] if self_head_mask is not None else None),
-                        cross_head_mask=(cross_head_mask[idx] if cross_head_mask is not None else None),
-                        output_attentions=output_attentions,
-                        encoder_hidden_states=encoder_hidden_states,
-                        encoder_attention_mask=encoder_attention_mask,
-                        past_key_values=past_key_values,
-                        use_cache=use_cache,
-                    )
+            - 1 indicates the head is **not masked**,
+            - 0 indicates the head is **masked**.
 
-                hidden_states = layer_outputs[0]
+        decoder_head_mask (`torch.Tensor` of shape `(decoder_layers, decoder_attention_heads)`, *optional*):
+            Mask to nullify selected heads of the attention modules in the decoder. Mask values selected in `[0, 1]`:
 
-                if use_cache:
-                    next_decoder_cache += (layer_outputs[3 if output_attentions else 1],)
+            - 1 indicates the head is **not masked**,
+            - 0 indicates the head is **masked**.
 
-                if output_attentions:
-                    all_attentions += (layer_outputs[1],)
+        cross_attn_head_mask (`torch.Tensor` of shape `(decoder_layers, decoder_attention_heads)`, *optional*):
+            Mask to nullify selected heads of the cross-attention modules. Mask values selected in `[0, 1]`:
 
-                    if encoder_hidden_states is not None:
-                        all_cross_attentions += (layer_outputs[2],)
+            - 1 indicates the head is **not masked**,
+            - 0 indicates the head is **masked**.
 
-            if output_attentions:
-                all_attentions += (layer_outputs[1],)
+        encoder_outputs (`tuple(tuple(torch.FloatTensor)`, *optional*):
+            Tuple consists of (`last_hidden_state`, *optional*: `hidden_states`, *optional*:
+            `attentions`) `last_hidden_state` of shape `(batch_size, sequence_length, hidden_size)`,
+            *optional*) is a sequence of hidden-states at the output of the last layer of the encoder. Used in the
+            cross-attention of the decoder.
+        past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+            Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors
+            of shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and 2 additional tensors of
+            shape `(batch_size, num_heads, encoder_sequence_length, embed_size_per_head)`.
 
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
+            Contains pre-computed hidden-states (key and values in the self-attention blocks and in the cross-attention
+            blocks) that can be used (see `past_key_values` input) to speed up sequential decoding.
 
-        if not return_dict:
-            return tuple(v for v in [hidden_states, all_hidden_states, all_attentions] if v is not None)
+            If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids`
+            (those that don't have their past key value states given to this model) of shape `(batch_size, 1)`
+            instead of all `decoder_input_ids` of shape `(batch_size, sequence_length)`. inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*): Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation. This is useful if you want more control over how to convert `input_ids` indices into associated
+            vectors than the model's internal embedding lookup matrix.
+        decoder_inputs_embeds (`torch.FloatTensor` of shape `(batch_size, target_sequence_length, hidden_size)`, *optional*):
+            Optionally, instead of passing `decoder_input_ids` you can choose to directly pass an embedded
+            representation. If `past_key_values` is used, optionally only the last `decoder_inputs_embeds`
+            have to be input (see `past_key_values`). This is useful if you want more control over how to convert
+            `decoder_input_ids` indices into associated vectors than the model's internal embedding lookup matrix.
 
-        return DecoderOutput(
-            last_hidden_states=hidden_states,
-            decoder_attentions=all_attentions,
-            decoder_hidden_states=all_hidden_states,
-        )
+            If `decoder_input_ids` and `decoder_inputs_embeds` are both unset, `decoder_inputs_embeds`
+            takes the value of `inputs_embeds`.
+        use_cache (`bool`, *optional*):
+            If set to `True`, `past_key_values` key value states are returned and can be used to speed up
+            decoding (see `past_key_values`).
+        output_attentions (`bool`, *optional*):
+            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
+            tensors for more detail.
+        output_hidden_states (`bool`, *optional*):
+            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
+            more detail.
+        return_dict (`bool`, *optional*):
+            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+"""
+
+
+TRANSFORMER_TRANSDUCER_STANDALONE_INPUTS_DOCSTRING = r"""
+    Args:
+        input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+            Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
+            it.
+
+            Indices can be obtained using [`ProphetNetTokenizer`]. See
+            [`PreTrainedTokenizer.encode`] and [`PreTrainedTokenizer.__call__`] for
+            details.
+
+            [What are input IDs?](../glossary#input-ids)
+        attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
+
+            - 1 for tokens that are **not masked**,
+            - 0 for tokens that are **masked**.
+
+            [What are attention masks?](../glossary#attention-mask)
+        output_attentions (`bool`, *optional*):
+            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
+            tensors for more detail.
+        output_hidden_states (`bool`, *optional*):
+            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
+            more detail.
+        return_dict (`bool`, *optional*):
+            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+"""
 
 
 class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
@@ -743,6 +778,166 @@ class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
         )
 
 
+class TransformerTransducerDecoder(TransformerTransducerPreTrainedModel):
+    def __init__(self, config: PretrainedConfig) -> None:
+        super(TransformerTransducerPreTrainedModel, self).__init__(config)
+        self.config = config
+        self.layerdrop = config.decoder_layerdrop
+
+        decoder_layers = [TransformerTransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
+        self.layers = nn.ModuleList(decoder_layers)
+
+        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
+        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.word_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+
+        self.gradient_checkpointing = False
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def _prepare_decoder_attention_mask(
+        self,
+        input_shape: Tuple[int],
+        inputs_embeds: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values_length: int = 0,
+    ) -> torch.Tensor:
+        # [NOTE]: 원래 attention_mask는 Optional이 아니였음.
+        #         무조건 값이 들어오도록 만들었어야 했을 것 같지만
+        #         `attention_mask is not None` 로 된 구문을 봤을 때 단순 버그라 생각된다.
+        #         _prepare_decoder_attention_mask는 generate시 생성되는 문장 만큼 attention_mask 생성하기 위해
+        #         attention_mask가 들어오지 않는 경우에 mask를 생성하는 기능을 추가해 놓은 듯 하다.
+
+        # create causal mask
+        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+        combined_attention_mask = None
+        if input_shape[-1] > 1:
+            combined_attention_mask = _make_causal_mask(
+                input_shape, inputs_embeds.dtype, past_key_values_length=past_key_values_length
+            ).to(inputs_embeds.device)
+
+        if attention_mask is not None:
+            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])
+            combined_attention_mask = (
+                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
+            )
+
+        return combined_attention_mask
+
+    def forward(
+        self,
+        labels: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_attention_mask: Optional[torch.LongTensor] = None,
+        output_attentions: Optional[torch.Tensor] = None,
+        output_hidden_states: Optional[bool] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        cross_head_mask: Optional[torch.Tensor] = None,
+        self_head_mask: Optional[torch.Tensor] = None,
+        use_cache: Optional[bool] = False,
+        return_dict: Optional[bool] = True,
+    ) -> Union[EncoderOutput, Tuple[Any]]:
+        # [TODO]: change head mask name, cross, self head mask is not inappropriate name --------
+
+        attentions_flag = output_attentions is not None
+        output_attentions = output_attentions if attentions_flag else self.config.output_attentions
+
+        output_hidden_flag = output_hidden_states is not None
+        output_hidden_states = output_hidden_states if output_hidden_flag else self.config.output_hidden_states
+
+        return_flag = return_dict is not None
+        return_dict = return_dict if return_flag else self.config.use_return_dict
+
+        # [XXX]: it's may need functionalization
+        seq_length = labels.shape[1]
+        position_ids = self.position_ids[:, :seq_length]
+        position_embed = self.position_embeddings(position_ids)
+        word_embed = self.word_embedding(labels)
+
+        hidden_states = word_embed + position_embed
+
+        label_shape = labels.shape
+        attention_mask = self._prepare_decoder_attention_mask(
+            attention_mask=attention_mask,
+            input_shape=label_shape,
+            inputs_embeds=position_embed,
+        )
+
+        all_hidden_states = () if output_hidden_states else None
+        all_attentions = () if output_attentions else None
+        all_cross_attentions = () if (output_attentions and encoder_hidden_states is not None) else None
+        next_decoder_cache = () if use_cache else None
+        if self_head_mask is not None:
+            if self_head_mask.size()[0] != (len(self.layers)):
+                raise ValueError(
+                    f"The head_mask should be specified for {len(self.layers)} layers, but it is for"
+                    f" {self_head_mask.size()[0]}."
+                )
+
+        for idx, decoder_layer in enumerate(self.layers):
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
+            # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+            dropout_probability = random.uniform(0, 1)
+            if self.training and (dropout_probability < self.layerdrop):  # skip the layer
+                layer_outputs = (None, None)
+            else:
+                if self.gradient_checkpointing and self.training:
+
+                    def create_custom_forward(module):
+                        def custom_forward(*inputs):
+                            return module(*inputs, output_attentions)
+
+                        return custom_forward
+
+                    layer_outputs = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(decoder_layer),
+                        hidden_states,
+                        attention_mask,
+                        (self_head_mask[idx] if self_head_mask is not None else None),
+                    )
+                else:
+                    layer_outputs = decoder_layer(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        self_head_mask=(self_head_mask[idx] if self_head_mask is not None else None),
+                        cross_head_mask=(cross_head_mask[idx] if cross_head_mask is not None else None),
+                        output_attentions=output_attentions,
+                        encoder_hidden_states=encoder_hidden_states,
+                        encoder_attention_mask=encoder_attention_mask,
+                        past_key_values=past_key_values,
+                        use_cache=use_cache,
+                    )
+
+                hidden_states = layer_outputs[0]
+
+                if use_cache:
+                    next_decoder_cache += (layer_outputs[3 if output_attentions else 1],)
+
+                if output_attentions:
+                    all_attentions += (layer_outputs[1],)
+
+                    if encoder_hidden_states is not None:
+                        all_cross_attentions += (layer_outputs[2],)
+
+            if output_attentions:
+                all_attentions += (layer_outputs[1],)
+
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
+
+        if not return_dict:
+            return tuple(v for v in [hidden_states, all_hidden_states, all_attentions] if v is not None)
+
+        return DecoderOutput(
+            last_hidden_states=hidden_states,
+            decoder_attentions=all_attentions,
+            decoder_hidden_states=all_hidden_states,
+        )
+
+
 class TransformerTransducerJoiner(nn.Module):
     def __init__(self, config: PretrainedConfig) -> None:
         super().__init__()
@@ -780,6 +975,10 @@ class TransformerTransducerJoiner(nn.Module):
         )
 
 
+@add_start_docstrings(
+    "The bare TransformerTransducer Model outputting raw hidden-states without any specific head on top.",
+    TRANSFORMER_TRANSDUCER_START_DOCSTRING,
+)
 class TransformerTransducerModel(TransformerTransducerPreTrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
         super(TransformerTransducerPreTrainedModel, self).__init__(config)
@@ -810,6 +1009,15 @@ class TransformerTransducerModel(TransformerTransducerPreTrainedModel):
 
         return hidden_state
 
+    @add_start_docstrings_to_model_forward(TRANSFORMER_TRANSDUCER_INPUTS_DOCSTRING)
+    @add_code_sample_docstrings(
+        processor_class=_PROCESSOR_FOR_DOC,
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=TransducerBaseModelOutput,
+        config_class=_CONFIG_FOR_DOC,
+        modality="audio",
+        expected_output=_EXPECTED_OUTPUT_SHAPE,
+    )
     def forward(
         self,
         input_features: torch.Tensor,
@@ -821,7 +1029,7 @@ class TransformerTransducerModel(TransformerTransducerPreTrainedModel):
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[TransducerBaseModelOutput, Tuple[Any]]:
+    ) -> Union[TransducerBaseModelOutput, Tuple]:
         # [XXX]: To make code easier to see, use the following method. Can be modified at any time.
         attentions_flag = output_attentions is not None
         output_attentions = output_attentions if attentions_flag else self.config.output_attentions
@@ -876,6 +1084,10 @@ class TransformerTransducerModel(TransformerTransducerPreTrainedModel):
         )
 
 
+@add_start_docstrings(
+    "The bare TransformerTransducer Model outputting raw hidden-states without any specific head on top.",
+    TRANSFORMER_TRANSDUCER_START_DOCSTRING,
+)
 class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
     def __init__(self, config: PretrainedConfig) -> None:
         super().__init__(config)
@@ -888,6 +1100,7 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
             clamp=config.clamp,
             reduction=config.loss_reduction,
         )
+
         self.post_init()
 
     def get_encoder(self) -> nn.Module:
@@ -899,6 +1112,9 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
     def get_joiner(self) -> nn.Module:
         return self.transducer.get_joiner()
 
+    @add_start_docstrings_to_model_forward(TRANSFORMER_TRANSDUCER_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=RNNTBaseOutput, config_class=_CONFIG_FOR_DOC)
+    @add_end_docstrings(TRANSFORMER_TRANSDUCER_GENERATION_EXAMPLE)
     def forward(
         self,
         input_features: torch.Tensor,
@@ -912,6 +1128,7 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
         label_lengths: Optional[torch.Tensor] = None,
         feature_lengths: Optional[torch.Tensor] = None,
     ) -> Union[RNNTBaseOutput, Tuple[Any]]:
+        """"""
         # [BUG]: !!!!!!!!! it's didn't work at DP !!!!!!!!!!!
 
         if attention_mask is not None:
@@ -1033,6 +1250,7 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
         decoder = self.get_decoder()
         joiner = self.get_joiner()
 
+        # [BUG]: If relative_positional embeding, an error occurs when the seq length of input_data is 1.
         decoder_outputs = decoder(input_features)
         decoder_state = decoder_outputs.last_hidden_states
         encoder_state = encoder_outputs.last_hidden_states
@@ -1059,8 +1277,8 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
                 if time_idx == feature_length or len(gen_sentence) == 512:
                     break
 
-                current_state = audio_logits[time_idx].view(-1)
-                decoder_state = decoder_state.view(-1)
+                current_state = audio_logits[time_idx].view(-1).unsqueeze(0)
+                decoder_state = decoder_state.view(-1).unsqueeze(0)
 
                 joiner_outputs = joiner(current_state, decoder_state)
                 next_token_logits = joiner_outputs.logits
@@ -1069,7 +1287,7 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
                 next_tokens_scores = torch.log_softmax(next_tokens_scores, dim=-1)
 
                 next_token = torch.argmax(next_tokens_scores)
-                next_token_score = next_tokens_scores[next_token]
+                next_token_score = next_tokens_scores[0][next_token]
 
                 if next_token == self.config.blk_token_id or repeat_count == self.config.generate_repeat_max:
                     time_idx += 1

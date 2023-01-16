@@ -7,20 +7,30 @@ import datasets
 import numpy as np
 import soundfile as sf
 import torch  # it's for debugging
-from data import TransformerTransducerCollator, TransformerTransducerFeatureExtractor, TransformerTransducerTokenizer
+from data import (
+    TransformerTransducerCollator,
+    TransformerTransducerFeatureExtractor,
+    TransformerTransducerTokenizer,
+    TestTransformerTransducerTokenizer,
+)
 from evaluate import load
 from model import TransformerTransducerConfig, TransformerTransducerForRNNT
 from setproctitle import setproctitle
 from torch.optim import AdamW
-from trainer import TransducerTrainer
-from transformers import HfArgumentParser, Seq2SeqTrainer, set_seed
+from transformers import HfArgumentParser, Seq2SeqTrainer, set_seed, Wav2Vec2CTCTokenizer, Seq2SeqTrainer
 from transformers.utils import logging
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
-from utils import DataArguments, ModelArguments, TransducerTrainArgument, get_tri_stage_scheduler_with_warmup
+from utils import (
+    DataArguments,
+    ModelArguments,
+    TransducerTrainArgument,
+    get_tri_stage_scheduler_with_warmup,
+    GaussianNoiseCallback,
+)
 
 logging.set_verbosity_info()
-logger = logging.getLogger("transformers")
+logger = logging.get_logger("transformers")
 
 
 def main(parser: HfArgumentParser) -> None:
@@ -70,8 +80,6 @@ def main(parser: HfArgumentParser) -> None:
 
     def data_preprocessing(data_type: str) -> datasets.Dataset:
         """doc"""
-        logger.info(f"------------ {data_type}_data preprocessing ------------")
-
         concat_group = [asr_data.pop(data_name) for data_name in list(asr_data) if data_type in data_name]
         data = datasets.concatenate_datasets(concat_group)
 
@@ -114,15 +122,20 @@ def main(parser: HfArgumentParser) -> None:
         config = TransformerTransducerConfig.from_pretrained(load_name, cache_dir=model_args.cache_dir)
         model = TransformerTransducerForRNNT.from_pretrained(load_name, cache_dir=model_args.cache_dir, config=config)
     else:
-        config = TransformerTransducerConfig(vocab_size=tokenizer.vocab_size, is_encoder_decoder=True)
+        config = TransformerTransducerConfig(
+            vocab_size=tokenizer.vocab_size,
+            is_encoder_decoder=True,
+            decoder_start_token_id=0,
+        )
         model = TransformerTransducerForRNNT(config)
 
     logger.info("\n---- load data ----")
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
 
     logger.info("\n---- data preprocessing ----")
+    asr_data.pop("validation.other")
+
     train_data = data_preprocessing("train") if train_args.do_train else None
-    del_data = asr_data.pop("validation.other")
     valid_data = data_preprocessing("validation.clean") if train_args.do_eval else None
     clean_data = data_preprocessing("clean") if train_args.do_predict else None
     other_data = data_preprocessing("other") if train_args.do_predict else None
@@ -158,8 +171,10 @@ def main(parser: HfArgumentParser) -> None:
         extractor=extractor,
         blank_id=config.blk_token_id,
     )
-    callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else None
-    trainer = TransducerTrainer(
+    callbacks = [WandbCallback] if os.getenv("WANDB_DISABLED") == "false" else []
+    callbacks.append(GaussianNoiseCallback)
+
+    trainer = Seq2SeqTrainer(
         model=model,
         tokenizer=tokenizer,
         optimizers=optimizers,

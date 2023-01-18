@@ -125,8 +125,8 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         self.center = center
         self.power = power
         self.filter_norm = filter_norm
-        self.f_max = max_frequency if max_frequency else float(sampling_rate // 2)
-        self.f_min = min_frequency
+        self.max_frequency = max_frequency if max_frequency else float(sampling_rate // 2)
+        self.min_frequency = min_frequency
 
         # [NOTE]: for window at spectrogram
         self.window_fn = window_fn(self.n_fft) if window_fn else np.hanning(self.n_fft)
@@ -172,8 +172,8 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         fb = np.zeros((n_freqs, n_mels), dtype=np.float32)
         all_freqs = np.linspace(0, self.sampling_rate // 2, n_freqs)
 
-        m_min = hz_to_mel(self.f_min, scale)
-        m_max = hz_to_mel(self.f_max, scale)
+        m_min = hz_to_mel(self.min_frequency, scale)
+        m_max = hz_to_mel(self.max_frequency, scale)
 
         # n_mels is chennel_size
         m_pts = np.linspace(m_min, m_max, n_mels + 2)

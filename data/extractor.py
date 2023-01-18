@@ -100,6 +100,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         filter_norm: Optional[str] = None,
         min_frequency: float = 0.0,
         max_frequency: Optional[float] = None,
+        do_normaliza: bool = False,
         padding_value: float = 0.0,
         return_attention_mask: bool = False,  # pad inputs to max length with silence token (zero) and no attention mask
         **kwargs,
@@ -128,7 +129,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         self.f_min = min_frequency
 
         # [NOTE]: for window at spectrogram
-        self.window = window_fn(self.n_fft) if window_fn else np.hanning(self.n_fft)
+        self.window_fn = window_fn(self.n_fft) if window_fn else np.hanning(self.n_fft)
         self.mel_filter = self.get_mel_filter(n_mels=feature_size, scale=self.mel_scale, norm=self.filter_norm)
 
         # [NOTE]: for compressor
@@ -280,7 +281,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         """
         # [NOTE]: Mel-Spectrogram
         frames = self.fram_wave(waveform, center=self.center)
-        stft = self.stft(frames, self.window)
+        stft = self.stft(frames, self.window_fn)
 
         magnitudes = np.abs(stft) ** self.power
         mel_spec = np.matmul(self.mel_filter, magnitudes)

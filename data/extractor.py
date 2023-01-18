@@ -375,6 +375,12 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
                 "Failing to do so can result in silent errors that might be hard to debug."
             )
 
+        if padding == "max_length":
+            logger.warning(
+                "If PaddingStrategy is max_length, padding may not proceed normally."
+                "If time_seq is longer than max_length, padding may not proceed normally."
+            )
+
         is_batched = bool(
             isinstance(raw_speech, (list, tuple))
             and (isinstance(raw_speech[0], np.ndarray) or isinstance(raw_speech[0], (tuple, list)))

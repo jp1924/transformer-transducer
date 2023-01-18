@@ -95,12 +95,10 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         stride: int = 3,
         power: int = 2.0,
         center: bool = True,
-        window_fn: Callable = None,
         mel_scale: str = "slaney",
         filter_norm: Optional[str] = None,
         min_frequency: float = 0.0,
         max_frequency: Optional[float] = None,
-        do_normaliza: bool = False,
         padding_value: float = 0.0,
         return_attention_mask: bool = False,  # pad inputs to max length with silence token (zero) and no attention mask
         **kwargs,
@@ -129,7 +127,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         self.min_frequency = min_frequency
 
         # [NOTE]: for window at spectrogram
-        self.window_fn = window_fn(self.n_fft) if window_fn else np.hanning(self.n_fft)
+        self.window_fn = np.hanning(self.n_fft)
         self.mel_filter = self.get_mel_filter(n_mels=feature_size, scale=self.mel_scale, norm=self.filter_norm)
 
         # [NOTE]: for compressor
@@ -168,7 +166,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         norm: Optional[str] = None,
     ) -> np.ndarray:
         """"""
-        n_freqs = self.n_fft // (2 + 1)
+        n_freqs = (self.n_fft // 2) + 1
         fb = np.zeros((n_freqs, n_mels), dtype=np.float32)
         all_freqs = np.linspace(0, self.sampling_rate // 2, n_freqs)
 
@@ -207,7 +205,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         return fb
 
     # [NOTE]: copied from https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/feature_extraction_whisper.py#L135-L169
-    def fram_wave(self, waveform, center=True):
+    def frame_wave(self, waveform, center=True):
         """
         Transform a raw waveform into a list of smaller waveforms. The window length defines how much of the signal is
         contain in each frame (smalle waveform), while the hope length defines the step between the beginning of each
@@ -217,7 +215,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         """
         frames = []
         for i in range(0, waveform.shape[0] + 1, self.hop_length):
-            half_window = (self.n_fft - 1) // (2 + 1)
+            half_window = ((self.n_fft - 1) // 2) + 1
 
             if center:
                 start = i - half_window if i > half_window else 0
@@ -280,7 +278,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         implementation with 1e-5 tolerance.
         """
         # [NOTE]: Mel-Spectrogram
-        frames = self.fram_wave(waveform, center=self.center)
+        frames = self.frame_wave(waveform, center=self.center)
         stft = self.stft(frames, self.window_fn)
 
         magnitudes = np.abs(stft) ** self.power
@@ -305,9 +303,9 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
 
         mel_spectrogram = [self.get_mel_spectrogram(waveform) for waveform in raw_speechs]
         log_mel_spectrograms = [self.apply_log(mel[:, :-1]) for mel in mel_spectrogram]
-        log_mel_spectrograms = [
-            np.transpose(log_mel, (1, 0)) for log_mel in log_mel_spectrograms
-        ]  # transpose for model
+
+        # transpose for model
+        log_mel_spectrograms = [np.transpose(log_mel, (1, 0)) for log_mel in log_mel_spectrograms]
 
         return log_mel_spectrograms
 

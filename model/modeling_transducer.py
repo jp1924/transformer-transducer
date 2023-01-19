@@ -1189,18 +1189,33 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
 
     def prepare_inputs_for_generation(
         self,
-        input_features: torch.Tensor,
+        input_features: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         decoder_attention_mask: Optional[torch.Tensor] = None,
+        encoder_inputs: Optional[torch.Tensor] = None,
+        decoder_inputs: Optional[torch.Tensor] = None,
+        time_frame: Optional[int] = None,
     ) -> Dict[str, Any]:
-        # 이 부분은 generate에서 어떻게 동작하는지 확인할 필요가 있음
-        return {
-            "input_features": input_features,
-            "labels": labels,
-            "attention_mask": attention_mask,
-            "decoder_attention_mask": decoder_attention_mask,
-        }
+        # [XXX]: `if` is need...?, i don't have idea for this
+        if (encoder_inputs is not None) and (decoder_inputs is not None):
+            current_states = encoder_inputs[time_frame]
+
+            # prevent for deepcopy issue
+            current_states = current_states.clone().unsqueeze(0)
+            decoder_inputs = decoder_inputs.clone().unsqueeze(0)
+
+            return {
+                "encoder_hiddens": current_states,
+                "decoder_hiddens": decoder_inputs,
+            }
+        else:
+            return {
+                "input_features": input_features,
+                "labels": labels,
+                "attention_mask": attention_mask,
+                "decoder_attention_mask": decoder_attention_mask,
+            }
 
     def greedy_search(
         self,
@@ -1214,6 +1229,8 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
         output_scores: Optional[bool] = None,
         return_dict_in_generate: Optional[bool] = None,
         synced_gpus: Optional[bool] = False,
+        repeat_max_count: Optional[int] = None,  # add
+        blank_token_id: Optional[int] = None,  # add
         **model_kwargs,
     ) -> Union[GreedySearchOutput, torch.LongTensor]:
         # [NOTE]: Still working on generate, so annotation may be korean
@@ -1245,6 +1262,9 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
         cross_attentions = () if (return_dict_in_generate and output_attentions) else None
         decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
 
+        repeat_max_count = repeat_max_count if repeat_max_count else self.config.generate_repeat_max
+        blank_token_id = blank_token_id if blank_token_id else self.config.blk_token_id
+
         # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
         if return_dict_in_generate and self.config.is_encoder_decoder:
             encoder_attentions = model_kwargs["encoder_outputs"].get("attentions") if output_attentions else None
@@ -1261,19 +1281,22 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
 
         # [BUG]: If relative_positional embeding, an error occurs when the seq length of input_data is 1.
         decoder_outputs = decoder(input_features)
-        decoder_state = decoder_outputs.last_hidden_states
-        encoder_state = encoder_outputs.last_hidden_states
-        feature_length = encoder_state.shape[1] - 1
+        decoder_states = decoder_outputs[0]
+
+        encoder_states = encoder_outputs[0]
+        feature_length = encoder_states.shape[1] - 1
+
+        # it's for generate
+        input_features = [feature for feature in input_features]
 
         repeat_count = 0
         decoding_list = list()
-        state_iter = enumerate(zip(encoder_state, decoder_state))
-        for batch_idx, (audio_logits, decoder_state) in state_iter:
-            time_idx = 0
-            gen_sentence = input_features[batch_idx]
+        state_iter = enumerate(zip(encoder_states, decoder_states))  # [XXX]
+        for batch_idx, (encoder_states, decoder_states) in state_iter:
+            time_frame = 0  # [XXX]: time_frame ? or time_idx ?
 
-            while True:
-                if synced_gpus:
+            while time_frame <= feature_length:
+                if synced_gpus:  # [TODO]: it need to check,
                     # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
                     # The following logic allows an early break if all peers finished generating their sequence
                     this_peer_finished_flag = torch.tensor(0.0 if this_peer_finished else 1.0, device=self.device)
@@ -1283,23 +1306,26 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
                     if this_peer_finished_flag.item() == 0.0:
                         break
 
-                if time_idx == feature_length or len(gen_sentence) == 512:
-                    break
+                joiner_inputs = self.prepare_inputs_for_generation(
+                    encoder_inputs=encoder_states,
+                    decoder_inputs=decoder_states,
+                    time_frame=time_frame,
+                )
+                joiner_outputs = joiner(**joiner_inputs)
 
-                current_state = audio_logits[time_idx].view(-1).unsqueeze(0)
-                decoder_state = decoder_state.view(-1).unsqueeze(0)
+                if synced_gpus and this_peer_finished:  # [TODO]: test need
+                    continue  # don't waste resources running the code we don't need
 
-                joiner_outputs = joiner(current_state, decoder_state)
-                next_token_logits = joiner_outputs.logits
+                next_token_logits = joiner_outputs.logits[:, -1, :]
 
-                next_tokens_scores = logits_processor(gen_sentence, next_token_logits)
+                next_tokens_scores = logits_processor(input_features[batch_idx], next_token_logits)
                 next_tokens_scores = torch.log_softmax(next_tokens_scores, dim=-1)
 
                 next_token = torch.argmax(next_tokens_scores)
-                next_token_score = next_tokens_scores[0][next_token]
+                next_token_score = next_tokens_scores[:, next_token]  # [XXX]: it's 2d array
 
-                if next_token == self.config.blk_token_id or repeat_count == self.config.generate_repeat_max:
-                    time_idx += 1
+                if (next_token == blank_token_id) or (repeat_count == repeat_max_count):
+                    time_frame += 1
                     repeat_count = 0
                     continue
 
@@ -1321,12 +1347,12 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
                             else (decoder_outputs.hidden_states,)
                         )
 
-                gen_sentence = torch.cat([gen_sentence, next_token[None]], dim=-1)
+                input_features[batch_idx] = torch.cat([input_features[batch_idx], next_token[None]], dim=-1)
 
-                decoder_outputs = decoder(gen_sentence[1:].unsqueeze(0))
-                decoder_state = decoder_outputs.last_hidden_states[:, -1, :]
+                decoder_outputs = decoder(input_features[batch_idx].unsqueeze(0))
+                decoder_states = decoder_outputs.last_hidden_states[:, -1, :]
                 repeat_count += 1
-            decoding_list.append(gen_sentence)
+            decoding_list.append(input_features[batch_idx])
 
         # [NOTE]: 일반적인 generate의 greedy search의 경우 model이 batch_size만큼 하나씩 예측해 나가기 때문에 cocnat및 pad문제에서 자유롭다.
         #         하지만 streaming 모델의 경우 위와 같은 방법으로 예측할 수 없기 때문에 별도로 pad를 붙여줘야 한다.

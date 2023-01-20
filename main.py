@@ -113,6 +113,7 @@ def main(parser: HfArgumentParser) -> None:
         hop_length=data_args.hop_length,
         stack=data_args.mel_stack,
         stride=data_args.window_stride,
+        sampling_rate=data_args.sampling_rate,
     )
     # [NOTE]: process does not worked, it's not added transformers init
     # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)

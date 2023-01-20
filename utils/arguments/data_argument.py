@@ -31,3 +31,7 @@ class DataArguments:
         default=128,
         metadata={"help": "windowing시 옆으로 옮겨갈 크기를 결정한다."},
     )
+    sampling_rate: int = field(
+        default=16000,
+        metadata={"help": ""},
+    )

@@ -28,28 +28,14 @@ from transformers.utils import (
     add_code_sample_docstrings,
     replace_return_docstrings,
 )
-
+from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, BaseModelOutput
 from .config import TransformerTransducerConfig
 
-
 if is_torchaudio_available():
-    from torchaudio.transforms import FrequencyMasking, RNNTLoss, TimeMasking
-else:
-    raise ModuleNotFoundError(
-        "Transformer-Transducer must need torchaudio, please intall torchaudio when you use transformer-transducer"
-    )
+    from torchaudio.transforms import RNNTLoss, FrequencyMasking, TimeMasking
+
 
 logger = logging.get_logger(__name__)
-
-# TODO-list
-# - [ ] Self-Attention relative-embedding check
-# - [ ] DP training check
-# - [ ] Add Doc-String
-# - [ ] Change name of outputs
-# - [ ] generate check
-#   - [ ] greedy-searcg clean code
-#   - [ ] duplecation delete check
-#   - [ ] Beam-Search check(optional)
 
 
 _CHECKPOINT_FOR_DOC = "transformer-transducer-960h"
@@ -92,24 +78,10 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
     return inverted_mask.masked_fill(inverted_mask.bool(), torch.finfo(dtype).min)
 
 
-# [TODO]: it's must be changed huggingface outputs style
-@dataclass
-class DecoderOutput(ModelOutput):
-    last_hidden_states: torch.Tensor
-    decoder_attentions: Optional[torch.Tensor] = None
-    decoder_hidden_states: Optional[torch.Tensor] = None
-
-
-# [TODO]: it's must be changed huggingface outputs style
-@dataclass
-class EncoderOutput(ModelOutput):
-    last_hidden_states: torch.Tensor
-    encoder_attentions: Optional[torch.Tensor] = None
-    encoder_hidden_states: Optional[torch.Tensor] = None
-
-
 @dataclass
 class TransformerTransducerJoinerOutput(ModelOutput):
+    """"""
+
     logits: torch.Tensor
     encoder_hidden_states: Optional[torch.Tensor] = None
     decoder_hidden_states: Optional[torch.Tensor] = None
@@ -135,6 +107,8 @@ class TransducerBaseModelOutput(ModelOutput):
 
     decoder_hidden_states: Optional[torch.Tensor] = None
     decoder_attentions: Optional[torch.Tensor] = None
+    decoder_past_key_values: Optional[torch.Tensor] = None
+    decoder_cross_attentions: Optional[torch.Tensor] = None
 
 
 # [XXX]: i think, it should change CausalLMOutput
@@ -154,13 +128,14 @@ class RNNTBaseOutput(ModelOutput):
     logits: Optional[torch.Tensor] = None
 
     encoder_attentions: Optional[torch.Tensor] = None
-    decoder_attentions: Optional[torch.Tensor] = None
     encoder_hidden_states: Optional[torch.Tensor] = None
+
+    decoder_attentions: Optional[torch.Tensor] = None
     decoder_hidden_states: Optional[torch.Tensor] = None
 
 
 class TransformerTransducerAttention(nn.Module):
-    def __init__(self, config: PretrainedConfig, position_embedding_type: Optional[str] = None):
+    def __init__(self, config, position_embedding_type: Optional[str] = None):
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
@@ -243,11 +218,12 @@ class TransformerTransducerAttention(nn.Module):
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
 
-        # [BUG]: relative positional embedding does not work!
+        # [BUG]: relative positional embedding does not work! >>>> SOLVED!!!!, this annotation will be deleted soon!
         #        CUDA error: CUBLAS_STATUS_NOT_SUPPORTED when calling
         #        `cublasSgemmStridedBatched( handle, opa, opb, m, n, k, &alpha, a, lda, stridea, b, ldb, strideb, &beta, c, ldc, stridec, num_batches)`
         #
-        #        >>> when seq length is 1, this error come out, This problem can occur because when generating, the next token is predicted by putting the blank token first.
+        #        >>> when seq length is 1, this error come out, This problem can occur
+        #            because when generating, the next token is predicted by putting the blank token first.
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             seq_length = hidden_states.size()[1]
             position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
@@ -259,6 +235,7 @@ class TransformerTransducerAttention(nn.Module):
             if self.position_embedding_type == "relative_key":
                 relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
                 attention_scores = attention_scores + relative_position_scores
+
             elif self.position_embedding_type == "relative_key_query":
                 relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
                 relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_layer, positional_embedding)
@@ -295,27 +272,27 @@ class TransformerTransducerAttention(nn.Module):
 
 
 class TransformerTransducerFeedForward(nn.Module):
-    def __init__(self, config: PretrainedConfig) -> None:
+    def __init__(self, config) -> None:
         super().__init__()
         # [NOTE]: Wav2Vec2를 참고해서 만들었음.
         self.intermediate_dropout = nn.Dropout(config.activation_dropout)
 
         self.intermediate_dense = nn.Linear(config.hidden_size, config.intermediate_size)
         if isinstance(config.hidden_act, str):
-            self.act_fn = ACT2FN[config.hidden_act]
+            self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
-            self.act_fn = config.hidden_act
+            self.intermediate_act_fn = config.hidden_act
 
-        self.ffn_dense = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.ffn_dropout = nn.Dropout(config.hidden_dropout)
+        self.output_dense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.output_dropout = nn.Dropout(config.hidden_dropout)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.intermediate_dense(hidden_states)
-        hidden_states = self.act_fn(hidden_states)
+        hidden_states = self.intermediate_act_fn(hidden_states)
         hidden_states = self.intermediate_dropout(hidden_states)
 
-        hidden_states = self.ffn_dense(hidden_states)
-        hidden_states = self.ffn_dropout(hidden_states)
+        hidden_states = self.output_dense(hidden_states)
+        hidden_states = self.output_dropout(hidden_states)
 
         return hidden_states
 
@@ -333,9 +310,11 @@ class TransformerTransducerEncoderLayer(nn.Module):
 
         self.is_decoder = config.is_decoder
         self.add_cross_attention = config.add_cross_attention
+
         if self.add_cross_attention:
             if not self.is_decoder:
                 raise ValueError(f"{self} should be used as a decoder model if cross attention is added")
+
             self.cross_attention = TransformerTransducerAttention(config, position_embedding_type="absolute")
 
     def forward(
@@ -369,7 +348,8 @@ class TransformerTransducerEncoderLayer(nn.Module):
 
         # [XXX]: I am not sure, Cross-Attention implementation is proper for this model.
         #        because streaming models have many architecture
-        #        it's always removed from this code
+        #        it's may be removed from this code,
+        # [TODO]: it's need to test
         present_key_value = None
         cross_attn_weights = None
         if self.is_decoder and encoder_hidden_states is not None:
@@ -592,7 +572,7 @@ TRANSFORMER_TRANSDUCER_STANDALONE_INPUTS_DOCSTRING = r"""
 
 
 class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
-    def __init__(self, config: PretrainedConfig) -> None:
+    def __init__(self, config) -> None:
         super(TransformerTransducerPreTrainedModel, self).__init__(config)
         self.config = config
         self.attention_type = self.config.attention_type
@@ -646,7 +626,7 @@ class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
             extended_attention_mask = attention_mask[:, None, :]
         else:
             # [TODO]: 나중에 영어로 작성할 것
-            raise ValueError("diagonal, chunk-wise, full 중 하나를 선택해 주세요!")
+            raise ValueError("diagonal, chunk-wise, original_full 중 하나를 선택해 주세요!")
 
         extended_attention_mask = extended_attention_mask[:, None, :, :]
         return extended_attention_mask.to(dtype)
@@ -708,19 +688,16 @@ class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
         self,
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
-        head_mask: Optional[torch.Tensor] = None,
-    ) -> Union[EncoderOutput, Tuple[Any]]:
-        attentions_flag = output_attentions is not None
-        output_attentions = output_attentions if attentions_flag else self.config.output_attentions
-
-        output_hidden_flag = output_hidden_states is not None
-        output_hidden_states = output_hidden_states if output_hidden_flag else self.config.output_hidden_states
-
-        return_flag = return_dict is not None
-        return_dict = return_dict if return_flag else self.config.use_return_dict
+    ) -> Union[BaseModelOutput, Tuple]:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # [TODO]: it need clean up
         feature_shape = input_features.size()
@@ -732,7 +709,7 @@ class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
         hidden_states = input_features + position_vector
 
         all_hidden_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
+        all_self_attentions = () if output_attentions else None
         if head_mask is not None:
             if head_mask.size()[0] != (len(self.layers)):
                 raise ValueError(
@@ -772,23 +749,23 @@ class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
 
                 hidden_states = layer_outputs[0]
             if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[1],)
+                all_self_attentions = all_self_attentions + (layer_outputs[1],)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, all_hidden_states, all_attentions] if v is not None)
+            return tuple(v for v in [hidden_states, all_hidden_states, all_self_attentions] if v is not None)
 
-        return EncoderOutput(
-            last_hidden_states=hidden_states,
-            encoder_attentions=all_attentions,
-            encoder_hidden_states=all_hidden_states,
+        return BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
         )
 
 
 class TransformerTransducerDecoder(TransformerTransducerPreTrainedModel):
-    def __init__(self, config: PretrainedConfig) -> None:
+    def __init__(self, config) -> None:
         super(TransformerTransducerPreTrainedModel, self).__init__(config)
         self.config = config
         self.layerdrop = config.decoder_layerdrop
@@ -798,7 +775,7 @@ class TransformerTransducerDecoder(TransformerTransducerPreTrainedModel):
 
         self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))  # from bert
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        self.word_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -845,9 +822,9 @@ class TransformerTransducerDecoder(TransformerTransducerPreTrainedModel):
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         cross_head_mask: Optional[torch.Tensor] = None,
         self_head_mask: Optional[torch.Tensor] = None,
-        use_cache: Optional[bool] = False,
-        return_dict: Optional[bool] = True,
-    ) -> Union[EncoderOutput, Tuple[Any]]:
+        use_cache: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[BaseModelOutputWithPastAndCrossAttentions, Tuple]:
         # [TODO]: change head mask name, cross, self head mask is not inappropriate name --------
 
         attentions_flag = output_attentions is not None
@@ -863,7 +840,7 @@ class TransformerTransducerDecoder(TransformerTransducerPreTrainedModel):
         seq_length = labels.shape[1]
         position_ids = self.position_ids[:, :seq_length]
         position_embed = self.position_embeddings(position_ids)
-        word_embed = self.word_embedding(labels)
+        word_embed = self.word_embeddings(labels)
 
         hidden_states = word_embed + position_embed
 
@@ -875,7 +852,7 @@ class TransformerTransducerDecoder(TransformerTransducerPreTrainedModel):
         )
 
         all_hidden_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
+        all_self_attentions = () if output_attentions else None
         all_cross_attentions = () if (output_attentions and encoder_hidden_states is not None) else None
         next_decoder_cache = () if use_cache else None
         if self_head_mask is not None:
@@ -926,61 +903,71 @@ class TransformerTransducerDecoder(TransformerTransducerPreTrainedModel):
                     next_decoder_cache += (layer_outputs[3 if output_attentions else 1],)
 
                 if output_attentions:
-                    all_attentions += (layer_outputs[1],)
+                    all_self_attentions += (layer_outputs[1],)
 
                     if encoder_hidden_states is not None:
                         all_cross_attentions += (layer_outputs[2],)
 
             if output_attentions:
-                all_attentions += (layer_outputs[1],)
+                all_self_attentions += (layer_outputs[1],)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, all_hidden_states, all_attentions] if v is not None)
+            return tuple(v for v in [hidden_states, all_hidden_states, all_self_attentions] if v is not None)
 
-        return DecoderOutput(
-            last_hidden_states=hidden_states,
-            decoder_attentions=all_attentions,
-            decoder_hidden_states=all_hidden_states,
+        return BaseModelOutputWithPastAndCrossAttentions(
+            last_hidden_state=hidden_states,
+            past_key_values=next_decoder_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+            cross_attentions=all_cross_attentions,
         )
 
 
 class TransformerTransducerJoiner(nn.Module):
-    def __init__(self, config: PretrainedConfig) -> None:
+    def __init__(self, config) -> None:
         super().__init__()
 
         self.encoder_linear = nn.Linear(config.hidden_size, config.intermediate_size)
         self.decoder_linear = nn.Linear(config.hidden_size, config.intermediate_size)
+
+        if isinstance(config.hidden_act, str):
+            self.joiner_act_fn = ACT2FN[config.joiner_act]
+        else:
+            self.joiner_act_fn = config.joiner_act
+
         self.tanh = nn.Tanh()
         self.dense = nn.Linear(config.intermediate_size, config.vocab_size)
 
     def forward(
         self,
-        encoder_hiddens: torch.Tensor,
-        decoder_hiddens: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        decoder_hidden_states: torch.Tensor,
         return_dict: Optional[bool] = True,
-    ) -> Union[TransformerTransducerJoinerOutput, Tuple[Any]]:
-        if encoder_hiddens.dim() == 3 and decoder_hiddens.dim() == 3:
-            encoder_hiddens = encoder_hiddens[:, :, None, :]
-            decoder_hiddens = decoder_hiddens[:, None, :, :]
+    ) -> Union[TransformerTransducerJoinerOutput, Tuple]:
+        if encoder_hidden_states.dim() == 3 and decoder_hidden_states.dim() == 3:
+            encoder_hidden_states = encoder_hidden_states[:, :, None, :]
+            decoder_hidden_states = decoder_hidden_states[:, None, :, :]
 
-        encoder_hiddens = self.encoder_linear(encoder_hiddens)
-        decoder_hiddens = self.decoder_linear(decoder_hiddens)
+        encoder_hidden_states = self.encoder_linear(encoder_hidden_states)
+        decoder_hidden_states = self.decoder_linear(decoder_hidden_states)
 
-        # [TODO]: it need to test torch.concat instead of +
-        joint_hiddens = encoder_hiddens + decoder_hiddens
-        joint_hiddens = self.tanh(joint_hiddens)
-        joint_hiddens = self.dense(joint_hiddens)
+        # [TODO]: it need to test torch.concat instead of "+"
+        joiner_hidden_states = encoder_hidden_states + decoder_hidden_states
+        joiner_hidden_states = self.joiner_act_fn(joiner_hidden_states)
+
+        # [NOTE]: The reason why the dense layer is inside the joiner is put in for reference.
+        logits = self.dense(joiner_hidden_states)
 
         if not return_dict:
-            return (joint_hiddens, encoder_hiddens, decoder_hiddens)
+            return (logits, encoder_hidden_states, decoder_hidden_states)
 
         return TransformerTransducerJoinerOutput(
-            logits=joint_hiddens,
-            encoder_hidden_states=encoder_hiddens,
-            decoder_hidden_states=decoder_hiddens,
+            logits,
+            encoder_hidden_states,
+            decoder_hidden_states,
         )
 
 
@@ -989,14 +976,22 @@ class TransformerTransducerJoiner(nn.Module):
     TRANSFORMER_TRANSDUCER_START_DOCSTRING,
 )
 class TransformerTransducerModel(TransformerTransducerPreTrainedModel):
-    def __init__(self, config: PretrainedConfig) -> None:
-        super(TransformerTransducerPreTrainedModel, self).__init__(config)
+    def __init__(self, config) -> None:
+        super().__init__(config)
         self.config = config
+        # [NOTE]:
+        # encoder: audio_encoder
+        # decoder: label_encoder, predicter
+        # joiner: joint_network
+        # It is used by various names such as etc.,
+        # but audio_encoder is named encoder, label_encoder is named decoder,
+        # and joint_network is named joiner according to hugingface.
 
         self.encoder = TransformerTransducerEncoder(config)
         self.decoder = TransformerTransducerDecoder(config)
         self.joiner = TransformerTransducerJoiner(config)
 
+        # [XXX]: it's may be change, like wav2vec2 spec-augment
         self.freq_masking = FrequencyMasking(config.freq_mask_size)
         self.time_masking = TimeMasking(config.time_mask_size)
 
@@ -1037,17 +1032,16 @@ class TransformerTransducerModel(TransformerTransducerPreTrainedModel):
         decoder_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
+        use_cache: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[TransducerBaseModelOutput, Tuple]:
         # [XXX]: To make code easier to see, use the following method. Can be modified at any time.
-        attentions_flag = output_attentions is not None
-        output_attentions = output_attentions if attentions_flag else self.config.output_attentions
-
-        output_hidden_flag = output_hidden_states is not None
-        output_hidden_states = output_hidden_states if output_hidden_flag else self.config.output_hidden_states
-
-        return_flag = return_dict is not None
-        return_dict = return_dict if return_flag else self.config.use_return_dict
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if self.training:
             input_features = self.spec_augment(input_features)
@@ -1069,6 +1063,7 @@ class TransformerTransducerModel(TransformerTransducerPreTrainedModel):
             output_hidden_states=output_hidden_states,
             self_head_mask=decoder_head_mask,
             return_dict=return_dict,
+            use_cache=use_cache,
         )
         decoder_hidden_states = decoder_outputs[0]
 
@@ -1086,10 +1081,10 @@ class TransformerTransducerModel(TransformerTransducerPreTrainedModel):
         #        it's need to add encoder & decoder's last_hidden_states?
         return TransducerBaseModelOutput(
             logits=hidden_states,
-            encoder_hidden_states=encoder_outputs.encoder_hidden_states,
-            decoder_hidden_states=decoder_outputs.decoder_hidden_states,
-            encoder_attentions=encoder_outputs.encoder_attentions,
-            decoder_attentions=decoder_outputs.decoder_attentions,
+            encoder_hidden_states=encoder_outputs.last_hidden_state,
+            decoder_hidden_states=decoder_outputs.last_hidden_state,
+            encoder_attentions=encoder_outputs.attentions,
+            decoder_attentions=decoder_outputs.attentions,
         )
 
 
@@ -1098,12 +1093,13 @@ class TransformerTransducerModel(TransformerTransducerPreTrainedModel):
     TRANSFORMER_TRANSDUCER_START_DOCSTRING,
 )
 class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
-    def __init__(self, config: PretrainedConfig) -> None:
+    def __init__(self, config) -> None:
         super().__init__(config)
         self.config = config
 
         self.transducer = TransformerTransducerModel(config)
         self.log_softmax = nn.LogSoftmax(dim=-1)
+
         self.rnnt_loss = RNNTLoss(
             blank=config.blk_token_id,
             clamp=config.clamp,
@@ -1206,8 +1202,8 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
             decoder_inputs = decoder_inputs.clone().unsqueeze(0)
 
             return {
-                "encoder_hiddens": current_states,
-                "decoder_hiddens": decoder_inputs,
+                "encoder_hidden_states": current_states,
+                "decoder_hidden_states": decoder_inputs,
             }
         else:
             return {
@@ -1306,6 +1302,10 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
                     if this_peer_finished_flag.item() == 0.0:
                         break
 
+                current_len = input_features[batch_idx].shape[0]
+                if current_len == max_length:
+                    break
+
                 joiner_inputs = self.prepare_inputs_for_generation(
                     encoder_inputs=encoder_states,
                     decoder_inputs=decoder_states,
@@ -1350,8 +1350,13 @@ class TransformerTransducerForRNNT(TransformerTransducerPreTrainedModel):
                 input_features[batch_idx] = torch.cat([input_features[batch_idx], next_token[None]], dim=-1)
 
                 decoder_outputs = decoder(input_features[batch_idx].unsqueeze(0))
-                decoder_states = decoder_outputs.last_hidden_states[:, -1, :]
+                decoder_states = decoder_outputs[0][:, -1, :]
                 repeat_count += 1
+
+                # [TODO]; it's need to change validate_stopping_criteria
+                if len(input_features[batch_idx]) == 512:
+                    if not synced_gpus:
+                        break
             decoding_list.append(input_features[batch_idx])
 
         # [NOTE]: 일반적인 generate의 greedy search의 경우 model이 batch_size만큼 하나씩 예측해 나가기 때문에 cocnat및 pad문제에서 자유롭다.

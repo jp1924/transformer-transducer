@@ -7,26 +7,21 @@ import datasets
 import numpy as np
 import soundfile as sf
 import torch  # it's for debugging
-from data import (
-    TransformerTransducerCollator,
-    TransformerTransducerFeatureExtractor,
-    TransformerTransducerTokenizer,
-    TestTransformerTransducerTokenizer,
-)
+from data import TransformerTransducerCollator, TransformerTransducerFeatureExtractor, TransformerTransducerTokenizer
 from evaluate import load
 from model import TransformerTransducerConfig, TransformerTransducerForRNNT
 from setproctitle import setproctitle
 from torch.optim import AdamW
-from transformers import HfArgumentParser, Seq2SeqTrainer, set_seed, Wav2Vec2CTCTokenizer, Seq2SeqTrainer
-from transformers.utils import logging
+from transformers import HfArgumentParser, Seq2SeqTrainer, Wav2Vec2CTCTokenizer, set_seed
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
+from transformers.utils import logging
 from utils import (
     DataArguments,
+    GaussianNoiseCallback,
     ModelArguments,
     TransducerTrainArgument,
     get_tri_stage_scheduler_with_warmup,
-    GaussianNoiseCallback,
 )
 
 logging.set_verbosity_info()

@@ -18,6 +18,7 @@ class TransformerTransducerConfig(PretrainedConfig):
         hidden_size=512,
         hidden_dropout=0.1,
         hidden_act="gelu",
+        joiner_act="tanh",
         layer_norm_eps=0.00001,
         max_position_embeddings=512,
         position_embedding_type="relative_key",
@@ -35,6 +36,7 @@ class TransformerTransducerConfig(PretrainedConfig):
         time_apply_num=10,
         blk_token_id=0,
         generate_repeat_max=10,
+        use_cache=False,
         **kwargs
     ) -> None:
         self.encoder_layers = encoder_layers
@@ -48,12 +50,16 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.hidden_dropout = hidden_dropout
         self.hidden_act = hidden_act
 
+        self.joiner_act = joiner_act
+
         self.attention_dropout = attention_dropout
         self.score_dropout = score_dropout
         self.num_attention_heads = num_attention_heads
 
         self.layer_norm_eps = layer_norm_eps
         self.hidden_dropout = hidden_dropout
+
+        self.use_cache = use_cache
 
         self.max_position_embeddings = max_position_embeddings
         self.position_embedding_type = position_embedding_type

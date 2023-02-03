@@ -23,11 +23,17 @@ def get_tri_stage_scheduler_with_warmup(
     if not (warmup_steps + hold_steps + decay_steps) <= num_training_steps:
         raise ValueError(
             f"""must don't exceed max_steps or epoch. but lr steps exceed max_step, please setting again
-            num_training_steps: {num_training_steps}, warmup_steps: {warmup_steps}, hold_steps: {hold_steps}, decay_steps: {decay_steps}"""
+            num_training_steps: {num_training_steps}
+            warmup_steps: {warmup_steps}
+            hold_steps: {hold_steps}
+            decay_steps: {decay_steps}
+            """
         )
 
     default_lr = optimizer.defaults["lr"]
-    warmup_factor = ((default_lr - default_lr) + (default_lr / default_lr)) / warmup_steps
+
+    warm_up_compensator = (default_lr - default_lr) + (default_lr / default_lr)
+    warmup_factor = warm_up_compensator / warmup_steps
     decay_factor = -math.log(final_lr) / decay_steps
 
     def _decide_stage(step: int) -> Tuple[int, int]:
@@ -51,8 +57,7 @@ def get_tri_stage_scheduler_with_warmup(
     def lr_lambda(current_step: int) -> float:
         stage, step = _decide_stage(current_step)
         if "warm" == stage:
-            compensator = (current_step if current_step else 1) * default_lr
-            learning_rate = (warmup_factor * step) + compensator
+            learning_rate = warmup_factor * step
         elif "hold" == stage:
             compensator = default_lr
             learning_rate = math.ceil(default_lr**compensator)

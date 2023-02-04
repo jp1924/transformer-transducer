@@ -31,10 +31,9 @@ from transformers.utils import (
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, BaseModelOutput
 from .config import TransformerTransducerConfig
 import numpy as np
-import matplotlib.pyplot as plt
 
 if is_torchaudio_available():
-    from torchaudio.transforms import RNNTLoss, FrequencyMasking, TimeMasking
+    from torchaudio.transforms import RNNTLoss
 
 
 logger = logging.get_logger(__name__)

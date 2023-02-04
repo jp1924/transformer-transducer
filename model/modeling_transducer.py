@@ -450,7 +450,6 @@ TRANSFORMER_TRANSDUCER_GENERATION_EXAMPLE = r"""
     >>> print(tokenizer.decode(summary_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False))
     ```
 
-    [TODO]: it's need to write doc-string!!!!
     Returns:
         [`{full_output_type}`] or `tuple(torch.FloatTensor)`: A [`{full_output_type}`] or a tuple of
         `torch.FloatTensor` (if `return_dict=False` is passed or when `config.return_dict=False`) comprising various

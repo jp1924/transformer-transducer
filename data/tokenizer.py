@@ -50,6 +50,8 @@ PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {"jp42maru/transformer-transducer-960h"
 TRANSFORMER_TRANSDUCER_KWARGS_DOCSTRING = r""""""
 
 
+# [TODO]: duplication word delete function like wav2vec2
+
 # [NOTE]: Transformer-Transducer tokenizer is grpaheme tokenizer
 #         and it's must be
 # [NOTE]: copied from Wav2Vec2Tokenizer
@@ -149,10 +151,6 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
         result = self.decoder.get(index, self.unk_token)
         return result
 
-    # def convert_tokens_to_string(
-
-    # def _get_word_offsets(
-
     def prepare_for_tokenization(self, text, is_split_into_words=False, **kwargs):
         if is_split_into_words:
             text = " " + text
@@ -170,12 +168,8 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
         """
         filtered_tokens = self.convert_ids_to_tokens(token_ids, skip_special_tokens=skip_special_tokens)
 
-        # [XXX]: BERT-Tokenizer를 사용할 지, Wav2Vec2-Tokenizer를 사용할 지 고민임, 이건 임시
         return "".join(filtered_tokens).strip()
 
-    # overwritten from `tokenization_utils_base.py` because tokenizer can output
-    # `ModelOutput` which should not be a list for batched output and
-    # because we need docs for `output_char_offsets` here
     def batch_decode(
         self,
         sequences: Union[List[int], List[List[int]], np.ndarray, torch.Tensor],
@@ -192,8 +186,6 @@ class TransformerTransducerTokenizer(PreTrainedTokenizer):
 
         return batch_decoded
 
-    # overwritten from `tokenization_utils_base.py` because we need docs for `output_char_offsets`
-    # and `output_word_offsets` here
     def decode(
         self,
         token_ids: Union[int, List[int], np.ndarray, torch.Tensor],

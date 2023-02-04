@@ -275,12 +275,13 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
     def get_mel_spectrogram(self, waveform: np.ndarray) -> np.ndarray:
         """
         Compute the log-Mel spectrogram of the provided audio, gives similar results whisper's original torch
-        implementation with 1e-5 tolerance.
+        implementation with 1 tolerance.
         """
-        # [NOTE]: Mel-Spectrogram
+        # [NOTE]: Spectrogram
         frames = self.frame_wave(waveform, center=self.center)
         stft = self.stft(frames, self.window_fn)
 
+        # [NOTE]: Mel-Scale
         magnitudes = np.abs(stft) ** self.power
         mel_spec = np.matmul(self.mel_filter, magnitudes)
 
@@ -378,7 +379,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         if padding == "max_length":
             logger.warning(
                 "If PaddingStrategy is max_length, padding may not proceed normally."
-                "If time_seq is longer than max_length, padding may not proceed normally."
+                "Not operating normally: time_seq greater than max_length"
             )
 
         is_batched = bool(

@@ -18,7 +18,7 @@ I referred to the repo below to make this.
 OS: Ubuntu 18.04.6 LTS     
 python: 3.8.13      
 pytorch
-> pip install torch==1.10.1+cu111 torchaudio==0.10.1+cu111 -f https://download.pytorch.org/whl/torch_stable.html    
+> pip install torchaudio==0.10.1+cu111 torch==1.10.1+cu111 -f https://download.pytorch.org/whl/torch_stable.html    
 </b>
 
 ## Abstract

@@ -659,7 +659,6 @@ TRANSFORMER_TRANSDUCER_INPUTS_DOCSTRING = r"""
             Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
 """
 
-
 TRANSFORMER_TRANSDUCER_STANDALONE_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
@@ -693,13 +692,7 @@ class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
     def __init__(self, config) -> None:
         super(TransformerTransducerPreTrainedModel, self).__init__(config)
         self.config = config
-        self.attention_type = self.config.attention_type
-        self.layerdrop = config.encoder_layerdrop
         self.gradient_checkpointing = False
-
-        self.left_context = None
-        self.right_context = None
-        self.chunk = None
 
         encoder_layers = [TransformerTransducerEncoderLayer(config) for _ in range(config.encoder_layers)]
         self.layers = nn.ModuleList(encoder_layers)
@@ -727,20 +720,20 @@ class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
             extended_attention_mask = attention_mask[:, None, :, :]
             return extended_attention_mask.to(dtype)
 
-        if self.attention_type == "chunk-wise":
+        if self.config.attention_type == "chunk-wise":
             extended_attention_mask = self._create_chunk_attention_mask(
                 attention_mask,
                 input_shape,
-                chunk_size=3,
+                chunk_size=self.config.mask_chunk_size,
             )
-        elif self.attention_type == "diagonal":
+        elif self.config.attention_type == "diagonal":
             extended_attention_mask = self._create_diagonal_attention_mask(
                 attention_mask,
                 input_shape,
-                left_context=10,
-                right_context=3,
+                left_context=self.config.mask_left_context,
+                right_context=self.config.mask_right_context,
             )
-        elif self.attention_type == "original_full":  # from BigBird Model
+        elif self.config.attention_type == "original_full":  # from BigBird Model
             extended_attention_mask = attention_mask[:, None, :]
         else:
             # [TODO]: 나중에 영어로 작성할 것
@@ -840,7 +833,7 @@ class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
                 all_hidden_states = all_hidden_states + (hidden_states,)
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             dropout_probability = random.uniform(0, 1)
-            if self.training and (dropout_probability < self.layerdrop):  # skip the layer
+            if self.training and (dropout_probability < self.config.encoder_layerdrop):  # skip the layer
                 layer_outputs = (None, None)
             else:
                 if self.gradient_checkpointing and self.training:
@@ -884,9 +877,8 @@ class TransformerTransducerEncoder(TransformerTransducerPreTrainedModel):
 
 class TransformerTransducerDecoder(TransformerTransducerPreTrainedModel):
     def __init__(self, config) -> None:
-        super(TransformerTransducerPreTrainedModel, self).__init__(config)
+        super().__init__(config)
         self.config = config
-        self.layerdrop = config.decoder_layerdrop
 
         decoder_layers = [TransformerTransducerEncoderLayer(config) for _ in range(config.decoder_layers)]
         self.layers = nn.ModuleList(decoder_layers)
@@ -985,7 +977,7 @@ class TransformerTransducerDecoder(TransformerTransducerPreTrainedModel):
                 all_hidden_states = all_hidden_states + (hidden_states,)
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             dropout_probability = random.uniform(0, 1)
-            if self.training and (dropout_probability < self.layerdrop):  # skip the layer
+            if self.training and (dropout_probability < self.config.decoder_layerdrop):  # skip the layer
                 layer_outputs = (None, None)
             else:
                 if self.gradient_checkpointing and self.training:
@@ -1056,7 +1048,6 @@ class TransformerTransducerJoiner(nn.Module):
         else:
             self.joiner_act_fn = config.joiner_act
 
-        self.tanh = nn.Tanh()
         self.dense = nn.Linear(config.intermediate_size, config.vocab_size)
 
     def forward(

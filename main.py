@@ -12,7 +12,7 @@ from evaluate import load
 from model import TransformerTransducerConfig, TransformerTransducerForRNNT
 from setproctitle import setproctitle
 from torch.optim import AdamW
-from transformers import HfArgumentParser, Seq2SeqTrainer, Wav2Vec2CTCTokenizer, set_seed
+from transformers import HfArgumentParser, Seq2SeqTrainer, set_seed
 from transformers.integrations import WandbCallback
 from transformers.trainer_utils import EvalPrediction, is_main_process
 from transformers.utils import logging
@@ -46,10 +46,12 @@ def main(parser: HfArgumentParser) -> None:
 
         wer_score = wer._compute(predictions, references)
         cer_score = cer._compute(predictions, references)
+
         result = {
             "wer": wer_score,
             "cer": cer_score,
         }
+
         return result
 
     def preprocessor(dataset: datasets.Dataset) -> Dict[str, Any]:
@@ -120,6 +122,10 @@ def main(parser: HfArgumentParser) -> None:
     else:
         config = TransformerTransducerConfig(
             vocab_size=tokenizer.vocab_size,
+            pad_token_id=tokenizer.pad_token_id,
+            unk_token_id=tokenizer.unk_token_id,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
             is_encoder_decoder=True,
             decoder_start_token_id=0,
         )

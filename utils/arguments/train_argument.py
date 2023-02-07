@@ -21,6 +21,6 @@ class TransducerTrainArgument(Seq2SeqTrainingArguments):
         metadata={"help": "gaussian noise의 평균값을 설정합니다."},
     )
     noise_std: float = field(
-        default=0.001,
+        default=0.01,
         metadata={"help": "gaussian noise의 분산값을 설정합니다."},
     )

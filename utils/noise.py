@@ -10,7 +10,7 @@ class GaussianNoiseCallback(TrainerCallback):
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         self.model: nn.Module = model
-        self.noise_flag = args.noise_step < 1
+        self.noise_flag = args.noise_steps < 1
         self.std = args.noise_std
         self.mean = args.noise_mean
 
@@ -20,7 +20,7 @@ class GaussianNoiseCallback(TrainerCallback):
         if self.noise_flag:
             return control
 
-        if state.global_step < args.noise_step:
+        if state.global_step < args.noise_steps:
             return control
 
         # [NOTE]: copied from https://discuss.pytorch.org/t/is-there-any-way-to-add-noise-to-trained-weights/29829/2

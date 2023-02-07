@@ -1,16 +1,16 @@
-script_path=""
-output_dir=""
-data_path=""
-cache_dir=""
+script_path="/data01/jsb193/github/transducer/transformer-transducer/main.py"
+output_dir="/data01/jsb193/github/transducer/output_dir"
+data_path="librispeech_asr"
+cache_dir="/data01/jsb193/github/transducer/.cache"
 
 num_gpu=4
 
-export CUDA_VISIBLE_DEVICES=""
+export CUDA_VISIBLE_DEVICES="0,1,2,3"
 export WANDB_DISABLED="false"
-export WANDB_PROJECT=""
-export WANDB_ENTITY=""
-export WANDB_RUN_GROUP=""
-export WANDB_TAGS=""
+export WANDB_PROJECT="TransformerTransducer"
+export WANDB_ENTITY="jp_42maru"
+export WANDB_RUN_GROUP="train"
+export WANDB_TAGS="rnn-t, streaming, transducer, train, librispeech"
 export WANDB_DISABLE_CODE="false"
 # export WANDB_RESUME=""
 # export WANDB_RUN_ID=""
@@ -21,8 +21,10 @@ export TORCH_DISTRIBUTED_DEBUG="DETAIL"
 python -m torch.distributed.launch --standalone --nnodes=1 --nproc_per_node=$num_gpu \
     $script_path \
     --output_dir=$output_dir \
-    --run_name="" \
+    --run_name="[JP]transducer-11" \
+    --vocab_path="/data01/jsb193/github/transducer/transformer-transducer/temp_vocab" \
     --cache=$cache_dir \
+    --data_name=$data_path \
     --per_device_train_batch_size=2 \
     --gradient_accumulation_steps=128 \
     --per_device_eval_batch_size=1 \
@@ -39,10 +41,10 @@ python -m torch.distributed.launch --standalone --nnodes=1 --nproc_per_node=$num
     --logging_steps=10 \
     --eval_steps=1000 \
     --save_steps=1000 \
-    --noise_step=10000 \
+    --noise_steps=10000 \
     --noise_mean=0.0 \
     --noise_std=0.01 \
-    --data_name=$data_path \
+    --data_name=librispeech_asr \
     --num_proc=2 \
     --mel_stack=4 \
     --window_stride=3 \

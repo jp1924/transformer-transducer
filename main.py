@@ -33,6 +33,11 @@ def main(parser: HfArgumentParser) -> None:
     setproctitle(train_args.run_name)
     set_seed(train_args.seed)
 
+    def logger_print(script: str) -> None:
+        # main_processor만 출력하게 만들기 위해서
+        if is_main_process(train_args.local_rank):
+            logger.info(script)
+
     def metrics(evaluation_result: EvalPrediction) -> Dict[str, float]:
         """doc"""
         result = dict()
@@ -102,7 +107,7 @@ def main(parser: HfArgumentParser) -> None:
     load_name = train_args.resume_from_checkpoint or model_args.model_name_or_path
     tokenizer_name = train_args.vocab_path or load_name
 
-    logger.info("\n---- set tokenizer & extractor ----")
+    logger_print("\n---- set tokenizer & extractor ----")
     tokenizer = TransformerTransducerTokenizer.from_pretrained(tokenizer_name, cache_dir=model_args.cache_dir)
     extractor = TransformerTransducerFeatureExtractor(
         n_fft=data_args.num_fourier,
@@ -112,10 +117,10 @@ def main(parser: HfArgumentParser) -> None:
         stride=data_args.window_stride,
         sampling_rate=data_args.sampling_rate,
     )
-    # [NOTE]: process does not worked, it's not added transformers init
+    # [NOTE]: process does not worked, because it's not added transformers init
     # processor = TransducerProcessor(feature_extractor=extractor, tokenizer=tokenizer)
 
-    logger.info("\n---- set model & config ----")
+    logger_print("\n-------- set model & config -------")
     if load_name:
         config = TransformerTransducerConfig.from_pretrained(load_name, cache_dir=model_args.cache_dir)
         model = TransformerTransducerForRNNT.from_pretrained(load_name, cache_dir=model_args.cache_dir, config=config)
@@ -131,10 +136,10 @@ def main(parser: HfArgumentParser) -> None:
         )
         model = TransformerTransducerForRNNT(config)
 
-    logger.info("\n---- load data ----")
+    logger_print("\n------------ load data ------------")
     asr_data = datasets.load_dataset(data_args.data_name, cache_dir=model_args.cache_dir)
 
-    logger.info("\n---- data preprocessing ----")
+    logger_print("\n-------- data preprocessing -------")
     asr_data.pop("validation.other")
 
     train_data = data_preprocessing("train") if train_args.do_train else None
@@ -142,12 +147,13 @@ def main(parser: HfArgumentParser) -> None:
     clean_data = data_preprocessing("clean") if train_args.do_predict else None
     other_data = data_preprocessing("other") if train_args.do_predict else None
 
-    logger.info("\n---- load metrics ----")
+    logger_print("\n----------- load metrics ----------")
     wer = load("evaluate-metric/wer", cache_dir=model_args.cache_dir)
     cer = load("evaluate-metric/cer", cache_dir=model_args.cache_dir)
 
-    logger.info("\n---- set optimizer & scheduler ----")
     if train_args.max_steps != -1:
+        logger_print("\n---- set optimizer & scheduler ----")
+
         optimizer = AdamW(
             params=model.parameters(),
             lr=train_args.learning_rate,
@@ -159,15 +165,15 @@ def main(parser: HfArgumentParser) -> None:
             optimizer=optimizer,
             num_training_steps=train_args.max_steps,
             final_lr=model_args.final_learning_rate,
-            num_warmup_steps=model_args.ramp_up_step_ratio,
             num_hold_steps=model_args.hold_step_ratio,
+            num_warmup_steps=model_args.ramp_up_step_ratio,
             num_decay_steps=model_args.decay_step_ratio,
         )
         optimizers = (optimizer, scheduler)
     else:
         optimizers = (None, None)
 
-    logger.info("\n---- set trainer ----")
+    logger_print("\n----------- set trainer -----------")
     collator = TransformerTransducerCollator(
         tokenizer,
         extractor=extractor,
@@ -188,21 +194,21 @@ def main(parser: HfArgumentParser) -> None:
         callbacks=callbacks,
     )
 
-    if train_args.do_train:
-        if train_args.do_fist_predict:
-            logger.info("\n---- run fisrt predict ----")
-            predict(trainer, clean_data, train_args, "clean")
-            predict(trainer, other_data, train_args, "other")
+    if train_args.do_fist_predict:
+        logger_print("\n-------- run fisrt predict --------")
+        predict(trainer, clean_data, train_args, "clean")
+        predict(trainer, other_data, train_args, "other")
 
-        logger.info("\n---- run train ----")
+    if train_args.do_train:
+        logger_print("\n------------ run train ------------")
         train(trainer, train_args)
 
     if train_args.do_eval:
-        logger.info("\n---- run eval ----")
+        logger_print("\n------------- run eval ------------")
         eval(trainer, valid_data, train_args)
 
     if train_args.do_predict:
-        logger.info("\n---- run predict ----")
+        logger_print("\n----------- run predict -----------")
         predict(trainer, clean_data, train_args, "clean", save=True)
         predict(trainer, other_data, train_args, "other", save=True)
 

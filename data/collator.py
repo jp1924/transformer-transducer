@@ -6,8 +6,6 @@ from transformers.feature_extraction_sequence_utils import SequenceFeatureExtrac
 
 
 class TransformerTransducerCollator:
-    max_length: int = 400
-
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer = None,

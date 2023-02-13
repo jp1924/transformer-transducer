@@ -3,15 +3,18 @@ from typing import Any, Dict, List
 import numpy as np
 from transformers import PreTrainedTokenizer
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
+from transformers import ProcessorMixin
+from typing import Optional
 
 
 class TransformerTransducerCollator:
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizer = None,
-        max_length=512,
-        extractor: SequenceFeatureExtractor = None,
-        blank_id=0,
+        tokenizer: Optional[PreTrainedTokenizer] = None,
+        extractor: Optional[SequenceFeatureExtractor] = None,
+        processor: Optional[ProcessorMixin] = None,
+        max_length: int = 512,
+        blank_id: int = 0,
     ) -> None:
         """DataLoader로 부터 건내받은 불규칙한 길이의 데이터를 일정한 길이오 만든 뒤 model에 건내주는 역할을 합니다.
 
@@ -31,9 +34,9 @@ class TransformerTransducerCollator:
         Args:
             tokenizer (PreTrainedTokenizer, optional): _description_. Defaults to None.
         """
-        self.tokenizer = tokenizer
+        self.tokenizer = processor.tokenizer if processor else tokenizer
+        self.extractor = processor.extractor if processor else extractor
         self.max_length = max_length
-        self.extractor = extractor
         self.blank_id = blank_id
 
     def __call__(self, batch_dataset: List[Dict[str, Any]]) -> Dict[str, Any]:

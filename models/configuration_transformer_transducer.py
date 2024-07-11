@@ -126,6 +126,7 @@ class TransfoXLConfig(PretrainedConfig):
         eos_token_id=0,
         feature_projection_input_dim=160,
         feat_proj_dropout=0.0,
+        feature_layer_norm_eps=1e-05,
         **kwargs,
     ):
         self.cutoffs = []
@@ -156,6 +157,7 @@ class TransfoXLConfig(PretrainedConfig):
         self.proj_init_std = proj_init_std
         self.init_std = init_std
         self.layer_norm_epsilon = layer_norm_epsilon
+        self.feature_layer_norm_eps = feature_layer_norm_eps
         self.feature_projection_input_dim = feature_projection_input_dim
         self.feat_proj_dropout = feat_proj_dropout
 
@@ -177,13 +179,7 @@ class TransfoXLConfig(PretrainedConfig):
 
 class TransformerTransducerConfig(PretrainedConfig):
     model_type = "transformer_transducer"
-    keys_to_ignore_at_inference = ["mems"]
-    attribute_map = {
-        "n_token": "vocab_size",
-        "hidden_size": "d_model",
-        "num_attention_heads": "n_head",
-        "num_hidden_layers": "n_layer",
-    }
+    is_composition = True
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -196,6 +192,10 @@ class TransformerTransducerConfig(PretrainedConfig):
         text_model_type = text_config["model_type"]
         text_config_class = CONFIG_MAPPING[text_model_type]
         self.text_config = text_config_class(**text_config)
+
+        self.vocab_size = kwargs.pop("vocab_size", self.text_config.vocab_size)
+        self.joint_act = kwargs.pop("joint_act", "tanh")
+        self.projection_dim = kwargs.pop("projection_dim", 512)
 
     @classmethod
     def from_vision_text_configs(

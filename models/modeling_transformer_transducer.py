@@ -169,7 +169,7 @@ def _compute_mask_indices(
 class TransformerTransducerFeatureProjection(nn.Module):
     def __init__(self, config: TransfoXLConfig):
         super().__init__()
-        self.layer_norm = nn.LayerNorm(config.feature_projection_input_dim, eps=config.layer_norm_eps)
+        self.layer_norm = nn.LayerNorm(config.feature_projection_input_dim, eps=config.feature_layer_norm_eps)
         self.projection = nn.Linear(config.feature_projection_input_dim, config.hidden_size)
         self.dropout = nn.Dropout(config.feat_proj_dropout)
 
@@ -803,9 +803,6 @@ TRANSFO_XL_INPUTS_DOCSTRING = r"""
 class TransfoXLModel(TransfoXLPreTrainedModel):
     def __init__(self, config: TransfoXLConfig):
         super().__init__(config)
-
-        self.n_token = config.vocab_size
-
         self.d_embed = config.d_embed
         self.d_model = config.d_model
         self.n_head = config.n_head
@@ -955,7 +952,7 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
     )
     def forward(
         self,
-        input_values: Optional[torch.LongTensor] = None,
+        input_features: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         mask_time_indices: Optional[torch.FloatTensor] = None,
         mems: Optional[List[torch.FloatTensor]] = None,
@@ -973,16 +970,16 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
 
         # the original code for Transformer-XL used shapes [len, bsz] but we want a unified interface in the library
         # so we transpose here from shape [bsz, len] to shape [len, bsz]
-        if input_values is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_values and inputs_embeds at the same time")
-        elif input_values is not None:
-            input_values = input_values.transpose(0, 1).contiguous()
-            qlen, bsz = input_values.size()
+        if input_features is not None and inputs_embeds is not None:
+            raise ValueError("You cannot specify both input_features and inputs_embeds at the same time")
+        elif input_features is not None:
+            input_features = input_features.transpose(0, 1).contiguous()
+            qlen, bsz = input_features.size()
         elif inputs_embeds is not None:
             inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
             qlen, bsz = inputs_embeds.shape[0], inputs_embeds.shape[1]
         else:
-            raise ValueError("You have to specify either input_values or inputs_embeds")
+            raise ValueError("You have to specify either input_features or inputs_embeds")
 
         if mems is None:
             mems = self.init_mems(bsz)
@@ -1133,13 +1130,13 @@ class TransformerTransducerForRNNT(PreTrainedModel):
 
     def get_audio_features(
         self,
-        input_values=None,
+        input_features=None,
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
     ):
         audio_outputs = self.audio_model(
-            pixel_values=input_values,
+            pixel_values=input_features,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
@@ -1155,7 +1152,7 @@ class TransformerTransducerForRNNT(PreTrainedModel):
 
     def forward(
         self,
-        input_values,
+        input_features,
         labels,
         attention_mask: Optional[torch.Tensor] = None,
         decoder_attention_mask: Optional[torch.Tensor] = None,
@@ -1172,7 +1169,7 @@ class TransformerTransducerForRNNT(PreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         audio_outputs = self.audio_model(
-            input_values=input_values,
+            input_features=input_features,
             mems=mems,
             attention_mask=attention_mask,
             output_attentions=output_attentions,

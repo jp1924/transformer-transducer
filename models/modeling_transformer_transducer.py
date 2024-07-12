@@ -402,66 +402,6 @@ class RelPartialLearnableDecoderLayer(nn.Module):
         return outputs
 
 
-class AdaptiveEmbedding(nn.Module):
-    def __init__(self, n_token, d_embed, d_proj, cutoffs, div_val=1, sample_softmax=False):
-        super().__init__()
-
-        self.n_token = n_token
-        self.d_embed = d_embed
-
-        self.cutoffs = cutoffs + [n_token]
-        self.div_val = div_val
-        self.d_proj = d_proj
-
-        self.emb_scale = d_proj**0.5
-
-        self.cutoff_ends = [0] + self.cutoffs
-
-        self.emb_layers = nn.ModuleList()
-        self.emb_projs = nn.ParameterList()
-        if div_val == 1:
-            self.emb_layers.append(nn.Embedding(n_token, d_embed, sparse=sample_softmax > 0))
-            if d_proj != d_embed:
-                self.emb_projs.append(nn.Parameter(torch.FloatTensor(d_proj, d_embed)))
-        else:
-            for i in range(len(self.cutoffs)):
-                l_idx, r_idx = self.cutoff_ends[i], self.cutoff_ends[i + 1]
-                d_emb_i = d_embed // (div_val**i)
-                self.emb_layers.append(nn.Embedding(r_idx - l_idx, d_emb_i))
-                self.emb_projs.append(nn.Parameter(torch.FloatTensor(d_proj, d_emb_i)))
-
-    def forward(self, inp):
-        if self.div_val == 1:
-            embed = self.emb_layers[0](inp)
-            if self.d_proj != self.d_embed:
-                embed = nn.functional.linear(embed, self.emb_projs[0])
-        else:
-            param = next(self.parameters())
-            inp_flat = inp.view(-1)
-            emb_flat = torch.zeros([inp_flat.size(0), self.d_proj], dtype=param.dtype, device=param.device)
-            for i in range(len(self.cutoffs)):
-                l_idx, r_idx = self.cutoff_ends[i], self.cutoff_ends[i + 1]
-
-                mask_i = (inp_flat >= l_idx) & (inp_flat < r_idx)
-                indices_i = mask_i.nonzero().squeeze()
-
-                if indices_i.numel() == 0:
-                    continue
-
-                inp_i = inp_flat.index_select(0, indices_i) - l_idx
-                emb_i = self.emb_layers[i](inp_i)
-                emb_i = nn.functional.linear(emb_i, self.emb_projs[i])
-
-                emb_flat.index_copy_(0, indices_i, emb_i)
-
-            embed_shape = inp.size() + (self.d_proj,)
-            embed = emb_flat.view(embed_shape)
-
-        embed.mul_(self.emb_scale)
-
-        return embed
-
-
 class TransfoXLPreTrainedModel(PreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
@@ -488,11 +428,6 @@ class TransfoXLPreTrainedModel(PreTrainedModel):
                 self._init_weight(m.weight)
             if hasattr(m, "bias") and m.bias is not None:
                 self._init_bias(m.bias)
-        elif classname.find("AdaptiveEmbedding") != -1:
-            if hasattr(m, "emb_projs"):
-                for i in range(len(m.emb_projs)):
-                    if m.emb_projs[i] is not None:
-                        nn.init.normal_(m.emb_projs[i], 0.0, self.config.proj_init_std)
         elif classname.find("Embedding") != -1:
             if hasattr(m, "weight"):
                 self._init_weight(m.weight)
@@ -633,86 +568,6 @@ class TransfoXLModelOutput(ModelOutput):
 
 
 @dataclass
-class TransfoXLSequenceClassifierOutputWithPast(ModelOutput):
-    """
-    Base class for outputs of sentence classification models.
-
-    Args:
-        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
-            Classification (or regression if config.num_labels==1) loss.
-        logits (`torch.FloatTensor` of shape `(batch_size, config.num_labels)`):
-            Classification (or regression if config.num_labels==1) scores (before SoftMax).
-        mems (`List[torch.FloatTensor]` of length `config.n_layers`):
-            Contains pre-computed hidden-states (key and values in the attention blocks). Can be used (see `mems`
-            input) to speed up sequential decoding. The token ids which have their past given to this model should not
-            be passed as input ids as they have already been computed.
-        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
-            shape `(batch_size, sequence_length, hidden_size)`.
-
-            Hidden-states of the model at the output of each layer plus the initial embedding outputs.
-        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-            sequence_length)`.
-
-            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
-            heads.
-    """
-
-    loss: Optional[torch.FloatTensor] = None
-    logits: torch.FloatTensor = None
-    mems: List[torch.FloatTensor] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[torch.FloatTensor]] = None
-
-
-@dataclass
-class TransfoXLLMHeadModelOutput(ModelOutput):
-    """
-    Base class for model's outputs that may also contain a past key/values (to speed up sequential decoding).
-
-    Args:
-        losses (`torch.FloatTensor` of shape *(batch_size, sequence_length-1)*, *optional*, returned when `labels` is provided):
-            Language modeling losses (not reduced).
-        prediction_scores (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
-            Prediction scores of the language modeling head (scores for each vocabulary token after SoftMax).
-        mems (`List[torch.FloatTensor]` of length `config.n_layers`):
-            Contains pre-computed hidden-states (key and values in the attention blocks). Can be used (see `mems`
-            input) to speed up sequential decoding. The token ids which have their past given to this model should not
-            be passed as input ids as they have already been computed.
-        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
-            shape `(batch_size, sequence_length, hidden_size)`.
-
-            Hidden-states of the model at the output of each layer plus the initial embedding outputs.
-        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-            sequence_length)`.
-
-            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
-            heads.
-        loss (`torch.FloatTensor` of shape `()`, *optional*, returned when `labels` is provided)
-            Reduced language modeling loss.
-    """
-
-    losses: Optional[torch.FloatTensor] = None
-    prediction_scores: torch.FloatTensor = None
-    mems: List[torch.FloatTensor] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[torch.FloatTensor]] = None
-    loss: Optional[torch.FloatTensor] = None
-
-    @property
-    def logits(self):
-        # prediction scores are the output of the adaptive softmax, see
-        # the file `modeling_transfo_xl_utilities`. Since the adaptive
-        # softmax returns the log softmax value, `self.prediction_scores`
-        # are strictly speaking not exactly `logits`, but behave the same
-        # way logits do.
-        return self.prediction_scores
-
-
-@dataclass
 class TransformerTransducerModelOutput(ModelOutput):
     """
     Base class for outputs of sentence classification models.
@@ -803,7 +658,6 @@ TRANSFO_XL_INPUTS_DOCSTRING = r"""
 class TransfoXLModel(TransfoXLPreTrainedModel):
     def __init__(self, config: TransfoXLConfig):
         super().__init__(config)
-        self.d_embed = config.d_embed
         self.d_model = config.d_model
         self.n_head = config.n_head
         self.d_head = config.d_head
@@ -848,6 +702,9 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
         else:  # learnable embeddings and absolute embeddings
             raise NotImplementedError  # Removed these to avoid maintaining dead code - They are not used in our pretrained checkpoint
 
+        if config.mask_time_prob > 0.0 or config.mask_feature_prob > 0.0:
+            self.masked_spec_embed = nn.Parameter(torch.Tensor(config.hidden_size).uniform_())
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -856,9 +713,6 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
 
     def set_input_embeddings(self, new_embeddings):
         self.audio_embed = new_embeddings
-
-    def backward_compatible(self):
-        self.sample_softmax = -1
 
     def reset_memory_length(self, mem_len):
         self.mem_len = mem_len
@@ -968,18 +822,19 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        bsz, qlen, _ = input_features.size()
         # the original code for Transformer-XL used shapes [len, bsz] but we want a unified interface in the library
         # so we transpose here from shape [bsz, len] to shape [len, bsz]
-        if input_features is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_features and inputs_embeds at the same time")
-        elif input_features is not None:
-            input_features = input_features.transpose(0, 1).contiguous()
-            qlen, bsz = input_features.size()
-        elif inputs_embeds is not None:
-            inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
-            qlen, bsz = inputs_embeds.shape[0], inputs_embeds.shape[1]
-        else:
-            raise ValueError("You have to specify either input_features or inputs_embeds")
+        # if input_features is not None and inputs_embeds is not None:
+        #     raise ValueError("You cannot specify both input_features and inputs_embeds at the same time")
+        # elif input_features is not None:
+        #     input_features = input_features.transpose(0, 1).contiguous()
+        #     qlen, bsz = input_features.size()
+        # elif inputs_embeds is not None:
+        #     inputs_embeds = inputs_embeds.transpose(0, 1).contiguous()
+        #     qlen, bsz = inputs_embeds.shape[0], inputs_embeds.shape[1]
+        # else:
+        #     raise ValueError("You have to specify either input_features or inputs_embeds")
 
         if mems is None:
             mems = self.init_mems(bsz)
@@ -1004,12 +859,13 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
         if inputs_embeds is not None:
             audio_embed = inputs_embeds
         else:
-            audio_embed, _ = self.audio_embed(input_values)
+            audio_embed, _ = self.audio_embed(input_features)
             audio_embed = self._mask_hidden_states(
                 audio_embed,
                 mask_time_indices=mask_time_indices,
                 attention_mask=attention_mask,
             )
+            audio_embed = audio_embed.transpose(1, 0)
 
         mlen = mems[0].size(0) if mems is not None else 0
         klen = mlen + qlen
@@ -1029,9 +885,9 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
         hids = []
         attentions = [] if output_attentions else None
         if self.attn_type == 0:  # default
-            pos_seq = torch.arange(klen - 1, -1, -1.0, device=audio_embed.device, dtype=torch.int64).type_as(
-                dtype=audio_embed.dtype
-            )
+            pos_seq = torch.arange(
+                klen - 1, -1, -1.0, device=audio_embed.device, dtype=torch.int64
+            )  # .type_as(dtype=audio_embed.dtype)
             if self.clamp_len > 0:
                 pos_seq.clamp_(max=self.clamp_len)
             pos_emb = self.pos_emb(pos_seq)
@@ -1085,6 +941,9 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
 
 # VisionTextDualEncoderModel를 참고함.
 class TransformerTransducerForRNNT(PreTrainedModel):
+    config_class = TransformerTransducerConfig
+    base_model_prefix = "transformer_transducer"
+
     def __init__(self, config: TransformerTransducerConfig) -> None:
         super().__init__(config)
 
@@ -1157,7 +1016,6 @@ class TransformerTransducerForRNNT(PreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         decoder_attention_mask: Optional[torch.Tensor] = None,
         mems: Optional[List[torch.FloatTensor]] = None,
-        return_loss: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -1185,31 +1043,36 @@ class TransformerTransducerForRNNT(PreTrainedModel):
             return_dict=return_dict,
         )
 
-        image_embeds = audio_outputs[1]  # pooler_output
-        image_embeds = self.audio_projection(image_embeds)
+        audio_embeds = audio_outputs[0]  # pooler_output
+        audio_embeds = self.audio_projection(audio_embeds)
 
-        text_embeds = text_outputs[1]  # pooler_output
+        text_embeds = text_outputs[0]  # pooler_output
         text_embeds = self.text_projection(text_embeds)
 
-        logits = self.joint_network(image_embeds + text_embeds)
-        log_prob = F.log_softmax(logits)
-
-        feature_lengths = attention_mask.sum(-1)
-        label_lengths = decoder_attention_mask.sum(-1) - 1  # remove blank length
-        non_blank_labels = labels[:, 1:]
+        combined_hidden = audio_embeds[:, :, None, :] + text_embeds[:, None, :, :]
+        logits = self.joint_network(combined_hidden)
+        log_prob = F.log_softmax(logits, dim=-1)
 
         loss = None
-        if return_loss:
-            loss_fct = RNNTLoss()
+        if labels is not None:
+            feature_lengths = attention_mask.sum(-1)
+            label_lengths = decoder_attention_mask.sum(-1) - 1  # remove blank length
+            non_blank_labels = labels[:, 1:]
+
+            loss_fct = RNNTLoss(
+                blank=self.config.blk_token_ids,
+                reduction=self.config.reduction,
+                fused_log_softmax=False,
+            )
             loss = loss_fct(
                 logits=log_prob,
-                targets=non_blank_labels,
-                target_lengths=label_lengths,
-                logit_lengths=feature_lengths,
+                targets=non_blank_labels.to(torch.int32),
+                target_lengths=label_lengths.to(torch.int32),
+                logit_lengths=feature_lengths.to(torch.int32),
             )
 
         if not return_dict:
-            output = (logits_per_image, logits_per_text, text_embeds, image_embeds, text_outputs, audio_outputs)
+            output = (log_prob, text_embeds, audio_embeds, text_outputs, audio_outputs)
             return ((loss,) + output) if loss is not None else output
 
         return TransformerTransducerModelOutput

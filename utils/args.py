@@ -18,10 +18,6 @@ class TransformerTransducerArguments(TrainingArguments):
         default=None,
         metadata={"help": "The name of the dataset to use (via the datasets library)."},
     )
-    noise_dataset_repo_ls: List[str] = field(
-        default=None,
-        metadata={"help": "The name of the dataset to use (via the datasets library)."},
-    )
     preprocessing_num_workers: int = field(
         default=4,
         metadata={"help": "The number of processes to use for the preprocessing."},

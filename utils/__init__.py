@@ -4,7 +4,6 @@ from .preprocessor import (
     centi_meter_regex,
     default_sentence_norm,
     double_space_regex,
-    get_feat_extract_output_lengths,
     kilo_meter_regex,
     librosa_silence_filter,
     meter_regex,
@@ -20,5 +19,6 @@ from .preprocessor import (
     unnormal_dual_bracket_regex,
     unnormal_dual_transcript_extractor,
 )
+
 
 set_scheduler()

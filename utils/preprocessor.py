@@ -329,29 +329,3 @@ def default_sentence_norm(sentence: str) -> str:
 
     return sentence
 
-
-def get_feat_extract_output_lengths(
-    input_lengths: int,
-    config: PretrainedConfig,
-    add_adapter: Optional[bool] = None,
-) -> int:
-    """
-    Computes the output length of the convolutional layers
-    """
-
-    add_adapter = config.add_adapter if add_adapter is None else add_adapter
-
-    def _conv_out_length(input_length, kernel_size, stride):
-        # 1D convolutional layer output length formula taken
-        # from https://pytorch.org/docs/stable/generated/torch.nn.Conv1d.html
-
-        return math.floor((input_length - kernel_size) / stride) + 1
-
-    for kernel_size, stride in zip(config.conv_kernel, config.conv_stride):
-        input_lengths = _conv_out_length(input_lengths, kernel_size, stride)
-
-    if add_adapter:
-        for _ in range(config.num_adapter_layers):
-            input_lengths = _conv_out_length(input_lengths, 1, config.adapter_stride)
-
-    return input_lengths

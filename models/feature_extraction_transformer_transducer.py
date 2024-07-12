@@ -396,8 +396,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         if not is_batched:
             raw_speech = [raw_speech]
 
-        log_mel_features = self.log_mel_transform(raw_speech)
-        compressed_features = [self.mel_compressor(log_mel) for log_mel in log_mel_features]
+        compressed_features = [self.mel_compressor(self.log_mel_transform(mel)[0]) for mel in raw_speech]
         batched_mel = BatchFeature({"input_features": compressed_features})
 
         padded_inputs = self.pad(

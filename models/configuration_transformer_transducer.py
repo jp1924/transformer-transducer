@@ -28,7 +28,7 @@ class TransfoXLConfig(PretrainedConfig):
         div_val=4,
         pre_lnorm=False,
         n_layer=12,
-        mem_len=1600,
+        mem_len=512,
         clamp_len=1000,
         same_length=True,
         proj_share_all_but_first=True,
@@ -122,6 +122,7 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.text_config = text_config_class(**text_config)
 
         self.vocab_size = kwargs.pop("vocab_size", self.text_config.vocab_size)
+        self.one_sec_mel_shape = kwargs.pop("one_sec_mel_shape", 34)
         self.joint_act = kwargs.pop("joint_act", "tanh")
         self.projection_dim = kwargs.pop("projection_dim", 512)
         self.blk_token_ids = kwargs.pop("blk_token_ids", -1)

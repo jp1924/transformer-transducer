@@ -387,7 +387,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
 
         if is_batched:
             raw_speech = [np.asarray(speech, dtype=np.float32) for speech in raw_speech]
-        elif not is_batched and not isinstance(raw_speech, np.ndarray):
+        elif not is_batched and not isinstance(raw_speech[0], np.ndarray):
             raw_speech = np.asarray(raw_speech, dtype=np.float32)
         elif isinstance(raw_speech, np.ndarray) and raw_speech.dtype is np.dtype(np.float64):
             raw_speech = raw_speech.astype(np.float32)

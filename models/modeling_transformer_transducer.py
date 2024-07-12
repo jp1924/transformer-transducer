@@ -1,23 +1,4 @@
-# coding=utf-8
-# Copyright 2018 Google AI, Google Brain and Carnegie Mellon University Authors and the HuggingFace Inc. team.
-# Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""
-PyTorch Transformer XL model. Adapted from https://github.com/kimiyoung/transformer-xl. In particular
-https://github.com/kimiyoung/transformer-xl/blob/master/pytorch/mem_transformer.py
-"""
-
+import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -42,9 +23,6 @@ from .configuration_transformer_transducer import TransformerTransducerConfig, T
 
 
 logger = logging.get_logger(__name__)
-
-_CHECKPOINT_FOR_DOC = "transfo-xl/transfo-xl-wt103"
-_CONFIG_FOR_DOC = "TransformerTransducerConfig"
 
 
 def _compute_mask_indices(
@@ -569,36 +547,11 @@ class TransfoXLModelOutput(ModelOutput):
 
 @dataclass
 class TransformerTransducerModelOutput(ModelOutput):
-    """
-    Base class for outputs of sentence classification models.
-
-    Args:
-        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
-            Classification (or regression if config.num_labels==1) loss.
-        logits (`torch.FloatTensor` of shape `(batch_size, config.num_labels)`):
-            Classification (or regression if config.num_labels==1) scores (before SoftMax).
-        mems (`List[torch.FloatTensor]` of length `config.n_layers`):
-            Contains pre-computed hidden-states (key and values in the attention blocks). Can be used (see `mems`
-            input) to speed up sequential decoding. The token ids which have their past given to this model should not
-            be passed as input ids as they have already been computed.
-        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
-            shape `(batch_size, sequence_length, hidden_size)`.
-
-            Hidden-states of the model at the output of each layer plus the initial embedding outputs.
-        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-            sequence_length)`.
-
-            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
-            heads.
-    """
-
     loss: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
     mems: List[torch.FloatTensor] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    text_embeds: torch.FloatTensor = None
+    audio_embeds: torch.FloatTensor = None
 
 
 TRANSFO_XL_START_DOCSTRING = r"""
@@ -800,9 +753,9 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(TRANSFO_XL_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
-        checkpoint=_CHECKPOINT_FOR_DOC,
+        checkpoint=None,
         output_type=TransfoXLModelOutput,
-        config_class=_CONFIG_FOR_DOC,
+        config_class="TransfoXLConfig",
     )
     def forward(
         self,
@@ -1026,14 +979,25 @@ class TransformerTransducerForRNNT(PreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        audio_outputs = self.audio_model(
-            input_features=input_features,
-            mems=mems,
-            attention_mask=attention_mask,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        _, seq_len, _ = input_features.shape
+        chunk_num = math.ceil(seq_len / self.config.one_sec_mel_shape) * self.config.one_sec_mel_shape
+        chunk_features_ls = list()
+        for idx in range(0, chunk_num, self.config.one_sec_mel_shape):
+            chunk_features = input_features[:, idx : idx + self.config.one_sec_mel_shape]
+            chunk_mask = attention_mask[:, idx : idx + self.config.one_sec_mel_shape]
+            audio_outputs = self.audio_model(
+                input_features=chunk_features,
+                mems=mems,
+                attention_mask=chunk_mask,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+            audio_embeds = audio_outputs[0]  # pooler_output
+            audio_embeds = self.audio_projection(audio_embeds)
+
+            mems = audio_outputs.mems
+            chunk_features_ls.append(audio_embeds)
 
         text_outputs = self.text_model(
             input_ids=labels,
@@ -1042,16 +1006,13 @@ class TransformerTransducerForRNNT(PreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-
-        audio_embeds = audio_outputs[0]  # pooler_output
-        audio_embeds = self.audio_projection(audio_embeds)
+        audio_embeds = torch.concat(chunk_features_ls, axis=1)
 
         text_embeds = text_outputs[0]  # pooler_output
         text_embeds = self.text_projection(text_embeds)
 
         combined_hidden = audio_embeds[:, :, None, :] + text_embeds[:, None, :, :]
         logits = self.joint_network(combined_hidden)
-        log_prob = F.log_softmax(logits, dim=-1)
 
         loss = None
         if labels is not None:
@@ -1062,17 +1023,23 @@ class TransformerTransducerForRNNT(PreTrainedModel):
             loss_fct = RNNTLoss(
                 blank=self.config.blk_token_ids,
                 reduction=self.config.reduction,
-                fused_log_softmax=False,
+                fused_log_softmax=True,
             )
             loss = loss_fct(
-                logits=log_prob,
+                logits=logits,
                 targets=non_blank_labels.to(torch.int32),
                 target_lengths=label_lengths.to(torch.int32),
                 logit_lengths=feature_lengths.to(torch.int32),
             )
 
         if not return_dict:
-            output = (log_prob, text_embeds, audio_embeds, text_outputs, audio_outputs)
+            output = (logits, text_embeds, audio_embeds, text_outputs, audio_outputs)
             return ((loss,) + output) if loss is not None else output
 
-        return TransformerTransducerModelOutput
+        return TransformerTransducerModelOutput(
+            loss=loss,
+            mems=mems,
+            logits=logits,
+            text_embeds=text_embeds,
+            audio_embeds=audio_embeds,
+        )

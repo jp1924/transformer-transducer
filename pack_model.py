@@ -13,11 +13,12 @@ BLK_TOKEN = "<blank>"
 
 
 def main() -> None:
-    text_model_name = ""
+    text_model_name = "heegyu/kogpt-neox-small"
     save_path = ""
 
     tokenizer = AutoTokenizer.from_pretrained(text_model_name)
     tokenizer.add_tokens(AddedToken(BLK_TOKEN, special=True, normalized=False), special_tokens=True)
+    tokenizer.pad_token_id = 0
 
     new_vocab_size = len(tokenizer.get_vocab())
     text_model = AutoModel.from_pretrained(text_model_name)
@@ -38,6 +39,7 @@ def main() -> None:
         text_config=text_config.to_dict(),
         audio_config=audio_config.to_dict(),
         vocab_size=new_vocab_size,
+        one_sec_mel_shape=34,
         blk_token_ids=tokenizer.convert_tokens_to_ids(BLK_TOKEN),
     )
     model = TransformerTransducerForRNNT(config)

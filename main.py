@@ -1,12 +1,14 @@
 import os
 from typing import Any, Dict, List, Optional, Union
 
+import numpy as np
+import pyarrow as pa
 import torch
 from data import DataCollatorRNNTWithPadding
 from datasets import Dataset, concatenate_datasets, load_dataset
 from models import TransformerTransducerForRNNT, TransformerTransducerProcessor
 from setproctitle import setproctitle
-from utils import TransformerTransducerArguments
+from utils import TransformerTransducerArguments, default_sentence_norm
 
 from transformers import HfArgumentParser, Trainer, is_torch_xla_available, is_wandb_available, set_seed
 from transformers import logging as hf_logging
@@ -31,13 +33,10 @@ def main(train_args: TransformerTransducerArguments) -> None:
         audio_ls = audio_ls if isinstance(audio_ls, list) else [audio_ls]
         audio_ls = [audio["array"] for audio in audio_ls]
 
-        normalized_sentence_ls = list()
-        normalized_audio_ls = list()
-        length_ls = list()
+        finish_data_ls = list()
         for sentence, audio in zip(sentence_ls, audio_ls):
-            audio = librosa_silence_filter(audio)
+            audio = np.array(audio)
             audio_length = audio.shape[0]
-
             if not audio.any():
                 continue
 
@@ -48,20 +47,18 @@ def main(train_args: TransformerTransducerArguments) -> None:
             if not sentence:
                 continue
 
-            sentence = tokenizer(sentence, return_attention_mask=False)["input_ids"]
-            label_length = len(sentence)
+            sentence = f"{BLK_TOKEN}{sentence}"
+            input_ids = processor(text=sentence, return_attention_mask=False, return_tensors="np")["input_ids"]
 
-            audio = feature_extractor(audio, sampling_rate=16000)["input_values"]
+            finish_data_ls.append(
+                {
+                    "input_features": audio,
+                    "labels": input_ids[0],
+                    train_args.length_column_name: audio_length,
+                }
+            )
 
-            normalized_sentence_ls.append(sentence)
-            normalized_audio_ls.append(audio)
-            length_ls.append(audio_length)
-
-        return {
-            "input_features": normalized_audio_ls,
-            "labels": normalized_sentence_ls,
-            train_args.length_column_name: length_ls,
-        }
+        return pa.Table.from_pylist(finish_data_ls)
 
     def collect_dataset(prefix_ls: List[str]) -> Optional[Dataset]:
         if not prefix_ls:
@@ -105,6 +102,7 @@ def main(train_args: TransformerTransducerArguments) -> None:
         GLOBAL_LOGGER.run._label(code="transformers_trainer")
 
     model = TransformerTransducerForRNNT.from_pretrained(train_args.model_name_or_path)
+    model = model.to("cpu")
     processor = TransformerTransducerProcessor.from_pretrained(train_args.model_name_or_path)
 
     if GLOBAL_LOGGER and is_main_process(train_args.local_rank):
@@ -112,7 +110,7 @@ def main(train_args: TransformerTransducerArguments) -> None:
 
     # load dataset & preprocess
     data_dict = dict()
-    for dataset_name in train_args.dataset_names:
+    for dataset_name in train_args.dataset_repo_ls:
         logger.info(f"load-{dataset_name}")
         dataset = load_dataset(dataset_name)
 
@@ -163,26 +161,6 @@ def main(train_args: TransformerTransducerArguments) -> None:
     if train_args.do_eval:
         valid_dataset = collect_dataset(train_args.valid_dataset_prefix)
 
-        valid_dataset_dict = dict()
-        valid_name_ls = valid_dataset["dataset_name"]
-        for dataset_name in set(valid_name_ls):
-            part_idx = [idx for idx, x in enumerate(valid_name_ls) if x == dataset_name]
-            part_dataset = valid_dataset.select(part_idx, keep_in_memory=False)
-
-            # 'jp1924/KconfSpeech-validation'
-            start = dataset_name.rindex("/") + 1
-            end = dataset_name.rindex("-")
-
-            if dataset_name[start:end] in train_args.valid_exclude_ls:
-                continue
-
-            if len(part_dataset) > train_args.valid_truncate_num:
-                part_dataset = part_dataset.shuffle(train_args.seed)
-                part_dataset = part_dataset.select(range(train_args.valid_truncate_num))
-
-            valid_dataset_dict[dataset_name[start:end]] = part_dataset
-        valid_dataset = valid_dataset_dict
-
         if is_main_process(train_args.local_rank) and valid_dataset:
             valid_total_length = sum(valid_dataset["length"])
             logger.info("valid_dataset")
@@ -217,8 +195,7 @@ def main(train_args: TransformerTransducerArguments) -> None:
         tokenizer=processor,
         data_collator=collator,
         train_dataset=train_dataset,
-        eval_dataset=valid_dataset_dict,
-        compute_metrics=compute_metrics,
+        eval_dataset=valid_dataset,
     )
     if train_args.do_train and train_dataset:
         train(trainer)

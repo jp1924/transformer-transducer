@@ -42,7 +42,7 @@ class DataCollatorRNNTWithPadding(DataCollatorMixin):
             # torch input 입력하는 경우 error가 발생 함.
             pro_outputs = self.processor(
                 audio=chunk_audio_ls,
-                sampling_rate=16000,
+                sampling_rate=self.sampling_rate,
                 return_tensors="pt",
             )
             check_ls.append(pro_outputs["attention_mask"].sum(-1))

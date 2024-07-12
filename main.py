@@ -58,8 +58,8 @@ def main(train_args: TransformerTransducerArguments) -> None:
             length_ls.append(audio_length)
 
         return {
+            "input_features": normalized_audio_ls,
             "labels": normalized_sentence_ls,
-            "input_values": normalized_audio_ls,
             train_args.length_column_name: length_ls,
         }
 

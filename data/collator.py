@@ -21,12 +21,8 @@ class DataCollatorRNNTWithPadding(DataCollatorMixin):
     pad_to_multiple_of_labels: Optional[int] = None
 
     def torch_call(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
-        input_features = [{"input_featurse": x["audio"]["array"]} for x in features]
-        # labels = [{"input_ids": feature["sentence"]} for feature in features]
-        labels = [
-            {"input_ids": self.processor(text=f"""<blank>{feature["sentence"]}""")["input_ids"]}
-            for feature in features
-        ]
+        input_features = [{"input_featurse": x["input_features"]} for x in features]
+        labels = [{"input_ids": feature["sentence"]} for feature in features]
 
         feature_ls = list()
         mask_ls = list()

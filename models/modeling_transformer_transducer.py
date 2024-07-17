@@ -21,6 +21,13 @@ from transformers.utils import (
 from .configuration_transformer_transducer import TransformerTransducerConfig, TransfoXLConfig
 
 
+try:
+    from k2 import do_rnnt_pruning, get_rnnt_prune_ranges, rnnt_loss_pruned, rnnt_loss_smoothed
+
+    USE_K2 = True
+except:
+    USE_K2 = False
+
 logger = logging.get_logger(__name__)
 
 
@@ -716,7 +723,7 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
         """
 
         # `config.apply_spec_augment` can set masking to False
-        if not getattr(self.config, "apply_spec_augment", True):
+        if not (getattr(self.config, "apply_spec_augment", True) and False):
             return hidden_states
 
         # generate indices & apply SpecAugment along time axis
@@ -908,11 +915,15 @@ class TransformerTransducerForRNNT(PreTrainedModel):
         self.text_embed_dim = config.text_config.hidden_size
         self.projection_dim = config.projection_dim
 
-        self.audio_projection = nn.Linear(self.audio_embed_dim, self.projection_dim)
-        self.text_projection = nn.Linear(self.text_embed_dim, self.projection_dim)
+        projection_dim = config.vocab_size if USE_K2 else self.projection_dim
+        self.audio_projection = nn.Linear(self.audio_embed_dim, projection_dim)
+        self.text_projection = nn.Linear(self.text_embed_dim, projection_dim)
 
         self.joint_act = ACT2FN[config.joint_act]
         self.vocab_projection = nn.Linear(self.projection_dim, config.vocab_size)
+
+        if USE_K2:
+            self.hidden_projection = nn.Linear(self.config.vocab_size, self.projection_dim)
 
     def get_text_features(
         self,
@@ -978,7 +989,7 @@ class TransformerTransducerForRNNT(PreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        _, seq_len, _ = input_features.shape
+        bsz, seq_len, _ = input_features.shape
         chunk_num = math.ceil(seq_len / self.config.one_sec_mel_shape) * self.config.one_sec_mel_shape
         chunk_features_ls = list()
         for idx in range(0, chunk_num, self.config.one_sec_mel_shape):
@@ -1010,11 +1021,11 @@ class TransformerTransducerForRNNT(PreTrainedModel):
         text_embeds = text_outputs[0]  # pooler_output
         text_embeds = self.text_projection(text_embeds)
 
-        combined_hidden = audio_embeds[:, :, None, :] + text_embeds[:, None, :, :]
-        logits = self.joint_network(combined_hidden)
-
         loss = None
-        if labels is not None:
+        if (labels is not None) and (not USE_K2):
+            combined_hidden = audio_embeds[:, :, None, :] + text_embeds[:, None, :, :]
+            logits = self.joint_network(combined_hidden)
+
             feature_lengths = attention_mask.sum(-1)
             label_lengths = decoder_attention_mask.sum(-1) - 1  # remove blank length
             non_blank_labels = labels[:, 1:]
@@ -1030,6 +1041,45 @@ class TransformerTransducerForRNNT(PreTrainedModel):
                 target_lengths=label_lengths.to(torch.int32),
                 logit_lengths=feature_lengths.to(torch.int32),
             )
+        elif (labels is not None) and USE_K2:
+            boundary = torch.zeros((bsz, 4), dtype=torch.int64, device=self.device)
+            boundary[:, 2] = decoder_attention_mask.sum(-1) - 1
+            boundary[:, 3] = attention_mask.sum(-1)
+
+            simple_loss, (px_grad, py_grad) = rnnt_loss_smoothed(
+                lm=text_embeds,
+                am=audio_embeds,
+                symbols=labels[:, 1:],
+                termination_symbol=self.config.blk_token_ids,
+                lm_only_scale=0.0,
+                am_only_scale=0.0,
+                boundary=boundary,
+                reduction=self.config.reduction,
+                return_grad=True,
+            )
+            prune_range = 5
+            ranges = get_rnnt_prune_ranges(
+                px_grad=px_grad,
+                py_grad=py_grad,
+                boundary=boundary,
+                s_range=prune_range,
+            )
+            am_pruned, lm_pruned = do_rnnt_pruning(lm=text_embeds, am=audio_embeds, ranges=ranges)
+
+            combined_hidden = am_pruned + lm_pruned
+            combined_hidden = self.hidden_projection(combined_hidden)
+            logits = self.joint_network(combined_hidden)
+
+            pruned_loss = rnnt_loss_pruned(
+                logits=logits,
+                symbols=labels[:, 1:],
+                ranges=ranges,
+                termination_symbol=self.config.blk_token_ids,
+                boundary=boundary,
+                reduction=self.config.reduction,
+            )
+
+            loss = simple_loss + pruned_loss
 
         if not return_dict:
             output = (logits, text_embeds, audio_embeds, text_outputs, audio_outputs)

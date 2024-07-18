@@ -21,14 +21,17 @@ from transformers.utils import (
 from .configuration_transformer_transducer import TransformerTransducerConfig, TransfoXLConfig
 
 
+logger = logging.get_logger(__name__)
+
 try:
     from k2 import do_rnnt_pruning, get_rnnt_prune_ranges, rnnt_loss_pruned, rnnt_loss_smoothed
 
+    logger.info("use k2")
+
     USE_K2 = True
 except:
+    logger.info("not use k2")
     USE_K2 = False
-
-logger = logging.get_logger(__name__)
 
 
 def _compute_mask_indices(
@@ -723,7 +726,7 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
         """
 
         # `config.apply_spec_augment` can set masking to False
-        if not (getattr(self.config, "apply_spec_augment", True) and False):
+        if not getattr(self.config, "apply_spec_augment", True):
             return hidden_states
 
         # generate indices & apply SpecAugment along time axis
@@ -1080,6 +1083,25 @@ class TransformerTransducerForRNNT(PreTrainedModel):
             )
 
             loss = simple_loss + pruned_loss
+
+            B = px_grad.size(0)
+            S = px_grad.size(1)
+            T = px_grad.size(2) - 1
+            # px_grad's shape (B, S, T+1)
+            # py_grad's shape (B, S+1, T)
+
+            px_grad_pad = torch.zeros((B, 1, T + 1), dtype=px_grad.dtype, device=self.device)
+            py_grad_pad = torch.zeros((B, S + 1, 1), dtype=px_grad.dtype, device=self.device)
+
+            px_grad_padded = torch.cat([px_grad, px_grad_pad], dim=1)
+            py_grad_padded = torch.cat([py_grad, py_grad_pad], dim=2)
+
+            # tot_grad's shape (B, S+1, T+1)
+            total_grad, y_axis_len, x_axis_len = (
+                (px_grad_padded + py_grad_padded),
+                decoder_attention_mask.sum(-1) - 1,
+                attention_mask.sum(-1),
+            )
 
         if not return_dict:
             output = (logits, text_embeds, audio_embeds, text_outputs, audio_outputs)

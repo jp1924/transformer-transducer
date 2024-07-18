@@ -45,12 +45,12 @@ class TransfoXLConfig(PretrainedConfig):
         feat_proj_dropout=0.0,
         feature_layer_norm_eps=1e-05,
         apply_spec_augment=True,
-        mask_time_prob=0.05,
-        mask_time_length=10,
-        mask_time_min_masks=2,
-        mask_feature_prob=0.0,
-        mask_feature_length=10,
-        mask_feature_min_masks=0,
+        mask_time_prob=0.1,
+        mask_time_length=30,
+        mask_time_min_masks=1,
+        mask_feature_prob=0.02,
+        mask_feature_length=50,
+        mask_feature_min_masks=1,
         **kwargs,
     ):
         super().__init__(**kwargs)

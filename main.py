@@ -102,8 +102,9 @@ def main(train_args: TransformerTransducerArguments) -> None:
         GLOBAL_LOGGER.run._label(code="transformers_trainer")
 
     model = TransformerTransducerForRNNT.from_pretrained(train_args.model_name_or_path)
-    model = model.to("cpu")
     processor = TransformerTransducerProcessor.from_pretrained(train_args.model_name_or_path)
+
+    model = model.to(torch.float32)
 
     if GLOBAL_LOGGER and is_main_process(train_args.local_rank):
         set_wandb()

@@ -43,7 +43,7 @@ class DataCollatorRNNTWithPadding(DataCollatorMixin):
         mask_ls = list()
         check_ls = list()
         for feature in features:
-            input_features = feature["input_features"]
+            input_features = feature["input_features"].numpy()
             chunk_audio_ls = self.get_audio_chunk_ls(input_features)
 
             # torch input 입력하는 경우 error가 발생 함.
@@ -71,5 +71,8 @@ class DataCollatorRNNTWithPadding(DataCollatorMixin):
 
         batch["labels"] = _labels["input_ids"]
         batch["decoder_attention_mask"] = _labels["attention_mask"]
+
+        batch = {k: v.to(torch.float32) for k, v in batch.items()}
+        batch["labels"] = batch["labels"].to(torch.long)
 
         return batch

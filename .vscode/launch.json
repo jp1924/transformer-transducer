@@ -1,0 +1,74 @@
+{
+    // IntelliSense를 사용하여 가능한 특성에 대해 알아보세요.
+    // 기존 특성에 대한 설명을 보려면 가리킵니다.
+    // 자세한 내용을 보려면 https://go.microsoft.com/fwlink/?linkid=830387을(를) 방문하세요.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python 디버거: 현재 파일",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Python t-t",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "deepspeed.launcher.runner",
+            "console": "integratedTerminal",
+            "env": {
+                "TORCHDYNAMO_DISABLE": "1",
+                "NCCL_P2P_DISABLE": "1",
+                "NCCL_IB_DISABLE": "1",
+                "WANDB_DISABLED": "true",
+                "OMP_NUM_THREADS": "4",
+            },
+            "justMyCode": false,
+            "args": [
+                "--num_gpus=2",
+                "/root/workspace/main.py",
+                "--output_dir=/root/output_dir",
+                "--run_name=test",
+                "--model_name_or_path=jp1924/TransformerTransducer-fast_rnnt",
+                "--preprocessing_num_workers=20",
+                "--per_device_train_batch_size=8",
+                "--gradient_accumulation_steps=2",
+                "--per_device_eval_batch_size=2",
+                "--overwrite_cache=false",
+                "--num_train_epochs=10",
+                "--seed=42",
+                "--do_train=true",
+                "--do_eval=true",
+                "--do_predict=true",
+                "--report_to=none",
+                "--learning_rate=0.001",
+                "--lr_scheduler_type=tri_stage",
+                "--warmup_ratio=0.4",
+                "--weight_decay=0.01",
+                "--evaluation_strategy=steps",
+                "--save_strategy=steps",
+                "--eval_steps=5000",
+                "--save_steps=5000",
+                "--logging_strategy=steps",
+                "--logging_steps=1",
+                "--fp16=false",
+                "--dataset_repo_ls=jp1924/KsponSpeech",
+                "--train_dataset_prefix=train",
+                "--valid_dataset_prefix=dev",
+                "--test_dataset_prefix",
+                "eval_clean",
+                "eval_other",
+                "--cache_file_name=preprocessor.arrow",
+                "--cache_dir=/root/.cache/.preprocessor_cache_dir",
+                "--gradient_checkpointing=false",
+                "--remove_unused_columns=true",
+                "--group_by_length=true",
+                "--torch_compile=true",
+                "--lr_scheduler_kwargs={\"num_hold_steps\": 0.1, \"num_decay_steps\": 0.5, \"final_learning_rate\": 0.00001}",
+                "--deepspeed=/root/workspace/config/ds_ZeRO2.json",
+            ]
+        }
+    ]
+}

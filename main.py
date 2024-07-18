@@ -8,7 +8,7 @@ from data import DataCollatorRNNTWithPadding
 from datasets import Dataset, concatenate_datasets, load_dataset
 from models import TransformerTransducerForRNNT, TransformerTransducerProcessor
 from setproctitle import setproctitle
-from utils import TransformerTransducerArguments, default_sentence_norm
+from utils import EmptyCacheCallback, TransformerTransducerArguments, default_sentence_norm
 
 from transformers import HfArgumentParser, Trainer, is_torch_xla_available, is_wandb_available, set_seed
 from transformers import logging as hf_logging
@@ -189,6 +189,7 @@ def main(train_args: TransformerTransducerArguments) -> None:
             fullgraph=True,
         )
 
+    callbacks = [EmptyCacheCallback()]
     # set trainer
     trainer = Trainer(
         model=model,
@@ -197,6 +198,7 @@ def main(train_args: TransformerTransducerArguments) -> None:
         data_collator=collator,
         train_dataset=train_dataset,
         eval_dataset=valid_dataset,
+        callbacks=callbacks,
     )
     if train_args.do_train and train_dataset:
         train(trainer)

@@ -3,7 +3,7 @@ from typing import List, Union
 
 from transformers import TrainingArguments
 
-from .optimization import SchedulerType
+from . import SchedulerType
 
 
 @dataclass

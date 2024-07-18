@@ -1082,26 +1082,7 @@ class TransformerTransducerForRNNT(PreTrainedModel):
                 reduction=self.config.reduction,
             )
 
-            loss = simple_loss + pruned_loss
-
-            B = px_grad.size(0)
-            S = px_grad.size(1)
-            T = px_grad.size(2) - 1
-            # px_grad's shape (B, S, T+1)
-            # py_grad's shape (B, S+1, T)
-
-            px_grad_pad = torch.zeros((B, 1, T + 1), dtype=px_grad.dtype, device=self.device)
-            py_grad_pad = torch.zeros((B, S + 1, 1), dtype=px_grad.dtype, device=self.device)
-
-            px_grad_padded = torch.cat([px_grad, px_grad_pad], dim=1)
-            py_grad_padded = torch.cat([py_grad, py_grad_pad], dim=2)
-
-            # tot_grad's shape (B, S+1, T+1)
-            total_grad, y_axis_len, x_axis_len = (
-                (px_grad_padded + py_grad_padded),
-                decoder_attention_mask.sum(-1) - 1,
-                attention_mask.sum(-1),
-            )
+            loss = (self.config.simple_loss_scale * simple_loss) + pruned_loss
 
         if not return_dict:
             output = (logits, text_embeds, audio_embeds, text_outputs, audio_outputs)

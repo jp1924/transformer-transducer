@@ -127,6 +127,7 @@ class TransformerTransducerConfig(PretrainedConfig):
         self.projection_dim = kwargs.pop("projection_dim", 512)
         self.blk_token_ids = kwargs.pop("blk_token_ids", -1)
         self.reduction = kwargs.pop("reduction", "mean")
+        self.simple_loss_scale = kwargs.pop("simple_loss_scale", 0.5)
 
     @classmethod
     def from_vision_text_configs(

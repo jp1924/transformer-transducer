@@ -123,8 +123,9 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         self.min_frequency = min_frequency
 
         # [NOTE]: for window at spectrogram
-        self.window_fn = np.hanning(self.n_fft)
-        self.mel_filter = self.get_mel_filter(n_mels=feature_size, scale=self.mel_scale, norm=self.filter_norm)
+        # save_pretrained할 때 to_dict에서 mel_filters, window는 필터링 함. preprocess.config에 엄청 긴 list가 저장되는 꼴을 보기 싫으면 이름을 이렇게 지정해 줘야 함.
+        self.window = np.hanning(self.n_fft)
+        self.mel_filters = self.get_mel_filter(n_mels=feature_size, scale=self.mel_scale, norm=self.filter_norm)
 
         # [NOTE]: for compressor
         self.stack = stack
@@ -275,11 +276,11 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         """
         # [NOTE]: Spectrogram
         frames = self.frame_wave(waveform, center=self.center)
-        stft = self.stft(frames, self.window_fn)
+        stft = self.stft(frames, self.window)
 
         # [NOTE]: Mel-Scale
         magnitudes = np.abs(stft) ** self.power
-        mel_spec = np.matmul(self.mel_filter, magnitudes)
+        mel_spec = np.matmul(self.mel_filters, magnitudes)
 
         return mel_spec
 

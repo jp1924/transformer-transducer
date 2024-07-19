@@ -18,7 +18,7 @@ Speech processor class for TransformerTransducer
 
 import warnings
 
-from transformers import AutoFeatureExtractor, AutoTokenizer
+from transformers import AutoTokenizer
 from transformers.processing_utils import ProcessorMixin
 
 from .feature_extraction_transformer_transducer import TransformerTransducerFeatureExtractor

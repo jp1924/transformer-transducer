@@ -425,7 +425,7 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
             raw_speech = [raw_speech]
 
         if self.do_normalize:
-            raw_speech = [self.log_mel_transform(speech) for speech in raw_speech]
+            raw_speech = self.zero_mean_unit_var_norm(raw_speech)
 
         compressed_features = [self.mel_compressor(self.log_mel_transform(mel)[0]) for mel in raw_speech]
         batched_mel = BatchFeature({"input_features": compressed_features})

@@ -6,12 +6,9 @@ from transformers.trainer_callback import TrainerCallback
 
 # [NOTE]: copied https://discuss.pytorch.org/t/how-to-add-noise-to-mnist-dataset-when-using-pytorch/59745/2
 class GaussianNoiseCallback(TrainerCallback):
-    def __init__(self) -> None:
-        pass
-
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         self.model: nn.Module = model
-        self.noise_flag = args.noise_steps < 1
+        self.noise_flag = 10000 < 1
         self.std = 0.01
         self.mean = 0.0
 
@@ -21,7 +18,7 @@ class GaussianNoiseCallback(TrainerCallback):
         if self.noise_flag:
             return control
 
-        if state.global_step < args.noise_steps:
+        if state.global_step < 10000:
             return control
 
         # [NOTE]: copied from https://discuss.pytorch.org/t/is-there-any-way-to-add-noise-to-trained-weights/29829/2

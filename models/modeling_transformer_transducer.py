@@ -561,6 +561,7 @@ class TransformerTransducerModelOutput(ModelOutput):
     mems: List[torch.FloatTensor] = None
     text_embeds: torch.FloatTensor = None
     audio_embeds: torch.FloatTensor = None
+    total_grad: torch.FloatTensor = None
 
 
 TRANSFO_XL_START_DOCSTRING = r"""
@@ -942,35 +943,39 @@ class TransformerTransducerForRNNT(PreTrainedModel):
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            token_type_ids=token_type_ids,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
 
-        pooled_output = text_outputs[1]
-        text_features = self.text_projection(pooled_output)
+        text_embeds = text_outputs[0]
+        text_features = self.text_projection(text_embeds)
 
         return text_features
 
     def get_audio_features(
         self,
         input_features=None,
+        attention_mask=None,
+        mems=None,
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
     ):
         audio_outputs = self.audio_model(
-            pixel_values=input_features,
+            input_features=input_features,
+            attention_mask=attention_mask,
+            mems=mems,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
 
-        pooled_output = audio_outputs[1]  # pooled_output
-        audio_features = self.audio_projection(pooled_output)
+        audio_embeds = audio_outputs[0]  # audio_embeds
+        mems = audio_outputs[1]
+        audio_features = self.audio_projection(audio_embeds)
 
-        return audio_features
+        return (audio_features, mems)
 
     def joint_network(self, hidden_states):
         return self.vocab_projection(self.joint_act(hidden_states))
@@ -1025,6 +1030,7 @@ class TransformerTransducerForRNNT(PreTrainedModel):
         text_embeds = self.text_projection(text_embeds)
 
         loss = None
+        total_grad = None
         if (labels is not None) and (not USE_K2):
             combined_hidden = audio_embeds[:, :, None, :] + text_embeds[:, None, :, :]
             logits = self.joint_network(combined_hidden)
@@ -1084,6 +1090,8 @@ class TransformerTransducerForRNNT(PreTrainedModel):
 
             loss = (self.config.simple_loss_scale * simple_loss) + pruned_loss
 
+            total_grad = px_grad + py_grad
+
         if not return_dict:
             output = (logits, text_embeds, audio_embeds, text_outputs, audio_outputs)
             return ((loss,) + output) if loss is not None else output
@@ -1092,6 +1100,7 @@ class TransformerTransducerForRNNT(PreTrainedModel):
             loss=loss,
             mems=mems,
             logits=logits,
+            total_grad=total_grad,
             text_embeds=text_embeds,
             audio_embeds=audio_embeds,
         )

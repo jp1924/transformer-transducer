@@ -1,14 +1,15 @@
+import math
 import os
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
-import pyarrow as pa
 import torch
 from data import DataCollatorRNNTWithPadding
 from datasets import Dataset, concatenate_datasets, load_dataset
 from models import TransformerTransducerForRNNT, TransformerTransducerProcessor
 from setproctitle import setproctitle
-from utils import EmptyCacheCallback, TransformerTransducerArguments, default_sentence_norm
+from trainer import TransformerTransducerTrainer
+from utils import EmptyCacheCallback, GaussianNoiseCallback, TransformerTransducerArguments, default_sentence_norm
 
 from transformers import HfArgumentParser, Trainer, is_torch_xla_available, is_wandb_available, set_seed
 from transformers import logging as hf_logging
@@ -33,14 +34,17 @@ def main(train_args: TransformerTransducerArguments) -> None:
         audio_ls = audio_ls if isinstance(audio_ls, list) else [audio_ls]
         audio_ls = [audio["array"] for audio in audio_ls]
 
-        finish_data_ls = list()
+        finish_data = {
+            "input_features": [],
+            "labels": [],
+            train_args.length_column_name: [],
+        }
         for sentence, audio in zip(sentence_ls, audio_ls):
             audio = np.array(audio)
             audio_length = audio.shape[0]
             if not audio.any():
                 continue
-
-            if not train_args.min_duration_in_seconds <= audio_length <= train_args.max_duration_in_seconds:
+            elif not train_args.min_duration_in_seconds <= audio_length <= train_args.max_duration_in_seconds:
                 continue
 
             sentence = default_sentence_norm(sentence)
@@ -50,15 +54,31 @@ def main(train_args: TransformerTransducerArguments) -> None:
             sentence = f"{BLK_TOKEN}{sentence}"
             input_ids = processor(text=sentence, return_attention_mask=False, return_tensors="np")["input_ids"]
 
-            finish_data_ls.append(
-                {
-                    "input_features": audio,
-                    "labels": input_ids[0],
-                    train_args.length_column_name: audio_length,
-                }
-            )
+            chunk_num = math.ceil(len(audio) / train_args.sampling_rate) * train_args.sampling_rate
 
-        return pa.Table.from_pylist(finish_data_ls)
+            chunk_idxer = range(0, chunk_num, train_args.sampling_rate)
+            chunk_audio_ls = list()
+            for i in chunk_idxer:
+                chunk_audio = audio[i : i + train_args.sampling_rate]
+
+                # mel로 변환할 때 음성의 길이가 너무 짧으면 processor에서 error가 발생 함.
+                if chunk_audio.shape[0] < processor.feature_extractor.n_fft:
+                    padded_array = np.zeros(processor.feature_extractor.n_fft)
+                    padded_array[: chunk_audio.shape[0]] = chunk_audio
+                    chunk_audio = padded_array
+                input_features = processor(
+                    audio=chunk_audio,
+                    sampling_rate=train_args.sampling_rate,
+                    return_tensors="np",
+                )["input_features"]
+
+                chunk_audio_ls.append(input_features)
+            flatten_input_features = np.hstack(chunk_audio_ls)[0]
+            finish_data["input_features"].append(flatten_input_features)
+            finish_data["labels"].append(input_ids[0])
+            finish_data[train_args.length_column_name].append(len(flatten_input_features))
+
+        return finish_data
 
     def collect_dataset(prefix_ls: List[str]) -> Optional[Dataset]:
         if not prefix_ls:
@@ -100,6 +120,9 @@ def main(train_args: TransformerTransducerArguments) -> None:
         if not is_torch_xla_available() and _watch_model in ("all", "parameters", "gradients"):
             GLOBAL_LOGGER.watch(model, log=_watch_model, log_freq=max(100, train_args.logging_steps))
         GLOBAL_LOGGER.run._label(code="transformers_trainer")
+
+    def compute_metrics() -> None:
+        return
 
     model = TransformerTransducerForRNNT.from_pretrained(train_args.model_name_or_path)
     processor = TransformerTransducerProcessor.from_pretrained(train_args.model_name_or_path)
@@ -178,9 +201,11 @@ def main(train_args: TransformerTransducerArguments) -> None:
             logger.info(f"test_total_hour: {(test_total_length / 16000) / 60**2:.2f}h")
 
     collator = DataCollatorRNNTWithPadding(
+        model=model,
         processor=processor,
-        sampling_rate=16000,
+        sampling_rate=train_args.sampling_rate,
     )
+
     if train_args.torch_compile:
         model = torch.compile(
             model,
@@ -189,9 +214,9 @@ def main(train_args: TransformerTransducerArguments) -> None:
             fullgraph=True,
         )
 
-    callbacks = [EmptyCacheCallback()]
+    callbacks = [EmptyCacheCallback(), GaussianNoiseCallback()]
     # set trainer
-    trainer = Trainer(
+    trainer = TransformerTransducerTrainer(
         model=model,
         args=train_args,
         tokenizer=processor,

@@ -66,6 +66,10 @@ class TransformerTransducerArguments(TrainingArguments):
         default=None,
         metadata={"help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
     )
+    sampling_rate: str = field(
+        default=16000,
+        metadata={"help": ""},
+    )
 
     # model
     model_name_or_path: str = field(

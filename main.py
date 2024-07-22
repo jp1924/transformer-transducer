@@ -245,7 +245,7 @@ def main(train_args: TransformerTransducerArguments) -> None:
         tokenizer=processor,
         data_collator=collator,
         train_dataset=train_dataset,
-        eval_dataset=valid_dataset.select(range(10)),
+        eval_dataset=valid_dataset,
         callbacks=callbacks,
         compute_metrics=compute_metrics,
         example_sample=example_sample,

@@ -8,7 +8,10 @@ from transformers.trainer_callback import TrainerCallback
 class GaussianNoiseCallback(TrainerCallback):
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         self.model: nn.Module = model
-        self.noise_flag = 10000 < 1
+
+        self.noise_step = 10000
+
+        self.noise_flag = self.noise_step < 1
         self.std = 0.01
         self.mean = 0.0
 
@@ -18,7 +21,7 @@ class GaussianNoiseCallback(TrainerCallback):
         if self.noise_flag:
             return control
 
-        if state.global_step < 10000:
+        if state.global_step < self.noise_step:
             return control
 
         # [NOTE]: copied from https://discuss.pytorch.org/t/is-there-any-way-to-add-noise-to-trained-weights/29829/2
@@ -45,5 +48,4 @@ class EmptyCacheCallback(TrainerCallback):
 
     def on_step_begin(self, args, state, control, logs=None, **kwargs):
         if state.global_step % 100 == 0:
-            print(f"empty_cache!!! {state.global_step}")
             torch.cuda.empty_cache()

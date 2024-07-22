@@ -70,6 +70,14 @@ class TransformerTransducerArguments(TrainingArguments):
         default=16000,
         metadata={"help": ""},
     )
+    rnn_t_grad_img_save_path: str = field(
+        default=None,
+        metadata={"help": ""},
+    )
+    rnn_t_grad_img_save_iterval: int = field(
+        default=20,
+        metadata={"help": ""},
+    )
 
     # model
     model_name_or_path: str = field(

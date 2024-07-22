@@ -1,11 +1,13 @@
 import math
 import os
+import random
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
 from data import DataCollatorRNNTWithPadding
 from datasets import Dataset, concatenate_datasets, load_dataset
+from evaluate import load
 from models import TransformerTransducerForRNNT, TransformerTransducerProcessor
 from setproctitle import setproctitle
 from trainer import TransformerTransducerTrainer
@@ -121,8 +123,18 @@ def main(train_args: TransformerTransducerArguments) -> None:
             GLOBAL_LOGGER.watch(model, log=_watch_model, log_freq=max(100, train_args.logging_steps))
         GLOBAL_LOGGER.run._label(code="transformers_trainer")
 
-    def compute_metrics() -> None:
-        return
+    def compute_metrics(examples) -> None:
+        label_ids = examples.label_ids
+        predictions = examples.predictions
+        label_ids[label_ids == -100] == 0
+        predictions[predictions == -100] == 0
+
+        label_ids = processor.batch_decode(label_ids, skip_special_tokens=True)
+        predictions = processor.batch_decode(predictions, skip_special_tokens=True)
+
+        wer_score = wer.compute(predictions=predictions, references=label_ids)
+        cer_score = cer.compute(predictions=predictions, references=label_ids)
+        return {"wer": wer_score, "cer": cer_score}
 
     model = TransformerTransducerForRNNT.from_pretrained(train_args.model_name_or_path)
     processor = TransformerTransducerProcessor.from_pretrained(train_args.model_name_or_path)
@@ -173,8 +185,18 @@ def main(train_args: TransformerTransducerArguments) -> None:
             data_dict[data_key].append(specific_dataset)
 
     train_dataset = None
+    example_sample = None
     if train_args.do_train:
         train_dataset = collect_dataset(train_args.train_dataset_prefix)
+        if train_args.rnn_t_grad_img_save_path:
+            example_sample = train_dataset.sort(train_args.length_column_name, reverse=True)[0]
+            example_sample.pop("dataset_name")
+            example_sample.pop("length")
+            example_sample = {k: v.unsqueeze(0) for k, v in example_sample.items()}
+
+            example_sample["attention_mask"] = torch.ones(example_sample["input_features"].shape[:-1])
+            example_sample["decoder_attention_mask"] = torch.ones(example_sample["labels"].shape)
+
         if is_main_process(train_args.local_rank) and train_dataset:
             train_total_length = sum(train_dataset["length"])
             logger.info("train_dataset")
@@ -200,6 +222,7 @@ def main(train_args: TransformerTransducerArguments) -> None:
             logger.info(test_dataset)
             logger.info(f"test_total_hour: {(test_total_length / 16000) / 60**2:.2f}h")
 
+    wer, cer = load("wer"), load("cer")
     collator = DataCollatorRNNTWithPadding(
         model=model,
         processor=processor,
@@ -214,16 +237,18 @@ def main(train_args: TransformerTransducerArguments) -> None:
             fullgraph=True,
         )
 
-    callbacks = [EmptyCacheCallback(), GaussianNoiseCallback()]
     # set trainer
+    callbacks = [EmptyCacheCallback(), GaussianNoiseCallback()]
     trainer = TransformerTransducerTrainer(
         model=model,
         args=train_args,
         tokenizer=processor,
         data_collator=collator,
         train_dataset=train_dataset,
-        eval_dataset=valid_dataset,
+        eval_dataset=valid_dataset.select(range(10)),
         callbacks=callbacks,
+        compute_metrics=compute_metrics,
+        example_sample=example_sample,
     )
     if train_args.do_train and train_dataset:
         train(trainer)

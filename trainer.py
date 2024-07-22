@@ -145,11 +145,14 @@ class TransformerTransducerTrainer(Trainer):
             with torch.no_grad():
                 model.eval()
                 example_sample = {k: v.to(model.device) for k, v in self.example_sample.items()}
-                total_grad = model(**example_sample).total_grad
+                chack_outputs = model(**example_sample)
+                total_grad = chack_outputs.total_grad
+                loss = chack_outputs.loss
                 total_grad = total_grad.detach().cpu().permute(0, 2, 1)
+                loss = loss.detach().cpu().item()
 
-                title = f"{self.state.global_step}-grad"
-                img_save_path = f"{self.args.rnn_t_grad_img_save_path}{self.state.global_step}-grad_img.png"
+                title = f"[{self.state.global_step}]{loss:.2f}-grad"
+                img_save_path = f"{self.args.rnn_t_grad_img_save_path}/{self.state.global_step}-grad_img.png"
                 plt.matshow(total_grad.unbind(0)[0].t(), origin="lower")
                 plt.xlabel("t")
                 plt.ylabel("u")

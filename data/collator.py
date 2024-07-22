@@ -142,13 +142,18 @@ class DataCollatorRNNTWithPadding(DataCollatorMixin):
         ]
 
         batch = self.processor.pad(
-            labels=labels,
             input_features=input_features,
             padding=self.padding,
             return_tensors=self.return_tensors,
         )
+        labels = self.processor.pad(
+            labels=labels,
+            padding=self.padding,
+            return_tensors=self.return_tensors,
+        )
         batch = {k: v.to(torch.float32) for k, v in batch.items()}
-        batch["labels"] = batch["labels"].to(torch.long)
+        batch["labels"] = labels["input_ids"].to(torch.long)
+        batch["decoder_attention_mask"] = labels["attention_mask"].to(torch.long)
 
         return batch
 

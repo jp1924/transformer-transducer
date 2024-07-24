@@ -20,5 +20,4 @@ RUN pip install -U pip wheel setuptools && \
     pip install soundfile librosa jiwer torch-audiomentations && \
     pip install setproctitle glances[gpu] && \
     pip install ruff natsort cmake && \
-    pip install torch==2.2.0+cu121 torchaudio==2.2.0+cu121 --index-url https://download.pytorch.org/whl/cu121 && \
-    pip install flash-attn==2.5.7
+    pip install torch==2.2.0+cu121 torchaudio==2.2.0+cu121 --index-url https://download.pytorch.org/whl/cu121

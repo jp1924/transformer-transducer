@@ -7,6 +7,7 @@ from numpy.fft import fft
 
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
+from transformers.image_utils import to_numpy_array
 from transformers.utils import TensorType, logging
 
 
@@ -423,6 +424,8 @@ class TransformerTransducerFeatureExtractor(SequenceFeatureExtractor):
         # always return batch
         if not is_batched:
             raw_speech = [raw_speech]
+
+        raw_speech = [to_numpy_array(speech) for speech in raw_speech]
 
         if self.do_normalize:
             raw_speech = self.zero_mean_unit_var_norm(raw_speech)

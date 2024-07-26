@@ -906,7 +906,6 @@ class TransformerTransducerForRNNT(PreTrainedModel):
             am_pruned, lm_pruned = do_rnnt_pruning(lm=text_embeds, am=audio_embeds, ranges=ranges)
 
             combined_hidden = am_pruned + lm_pruned
-            combined_hidden = self.hidden_projection(combined_hidden)
             logits = self.joint_network(combined_hidden)
 
             pruned_loss = rnnt_loss_pruned(

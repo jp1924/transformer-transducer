@@ -25,3 +25,28 @@ services:
             - driver: nvidia
               count: all
               capabilities: [ gpu ]
+  serve_container:
+    container_name: TransformerTransducer-serve
+    build:
+      context: .
+      dockerfile: Dockerfile.serve
+    volumes:
+      - ./:/root/workspace
+      - ~/.cache:/root/.cache
+      - ./.vscode:/root/.vscode
+      - ~/output_dir/transformer_transducer:/root/output_dir
+    tty: true
+    shm_size: 126G
+    environment:
+      - LC_ALL=C.UTF-8
+      - LANG=C.UTF-8
+      - TZ=Asia/Seoul
+    cap_drop:
+      - SYS_ADMIN
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]

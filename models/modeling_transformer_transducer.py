@@ -763,11 +763,10 @@ class TransformerTransducerForRNNT(PreTrainedModel):
         input_ids=None,
         attention_mask=None,
         position_ids=None,
-        token_type_ids=None,
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
-    ):
+    ) -> torch.Tensor:
         text_outputs = self.text_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -790,7 +789,7 @@ class TransformerTransducerForRNNT(PreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
-    ):
+    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         audio_outputs = self.audio_model(
             input_features=input_features,
             attention_mask=attention_mask,
@@ -806,7 +805,9 @@ class TransformerTransducerForRNNT(PreTrainedModel):
 
         return (audio_features, mems)
 
-    def joint_network(self, hidden_states):
+    def joint_network(self, hidden_states) -> torch.Tensor:
+        if USE_K2:
+            hidden_states = self.hidden_projection(hidden_states)
         return self.vocab_projection(self.joint_act(hidden_states))
 
     def forward(

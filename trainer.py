@@ -80,7 +80,7 @@ def greedy_search(
             continue
 
         frame = audio_features[cur_frame_num]
-        joint_out = model.joint_network(model.hidden_projection(frame + decoder_out))
+        joint_out = model.joint_network(frame + decoder_out)
 
         pred = joint_out.log_softmax(-1).argmax(-1).item()
         if pred != model.config.blk_token_ids:

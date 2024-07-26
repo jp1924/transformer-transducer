@@ -1,0 +1,48 @@
+name: "transformer_transducer"
+backend: "python"
+max_batch_size: 0
+
+parameters [
+  {
+    key: "model_name_or_path"
+    value: {string_value: "jp1924/TransformerTransducer"}
+  }
+]
+
+input [
+  {
+    name: "text"
+    dims: [ -1 ]
+    data_type: TYPE_INT32
+  },
+  {
+    name: "audio"
+    dims: [ -1 ]
+    data_type: TYPE_FP32
+  },
+  {
+    name: "cache"
+    dims: [ 12, 512, 1, 512 ]
+    data_type: TYPE_FP32
+  }
+]
+output [
+  {
+    name: "text"
+    data_type: TYPE_INT32
+    dims: [ -1 ]
+  },
+  {
+    name: "cache"
+    dims: [ 12, 512, 1, 512 ]
+    data_type: TYPE_FP32
+  }
+]
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+version_policy: { specific: { versions: [1]}}

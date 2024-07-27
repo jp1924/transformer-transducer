@@ -31,7 +31,7 @@ class TritonPythonModel:
             audio = pb_utils.get_input_tensor_by_name(request, "audio").as_numpy()
             cache = pb_utils.get_input_tensor_by_name(request, "cache").as_numpy()
 
-            input_params = self.processor(audio=audio, sample_rate=16000, return_tensors="pt")
+            input_params = self.processor(audio=audio, sampling_rate=16000, return_tensors="pt")
             input_params = {k: v.to(self.device) for k, v in input_params.items()}
             input_params["mems"] = torch.tensor(cache, device=self.device)
             audio_features, mems = self.model.get_audio_features(**input_params)
